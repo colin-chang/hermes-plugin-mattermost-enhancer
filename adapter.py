@@ -739,10 +739,11 @@ class MattermostApprovalAdapter(MattermostAdapter):
                     success=False, error="Failed to send DM approval post"
                 )
 
-            # 5. 在原频道发送简短提示
+            # 5. 在原频道/Thread 发送简短提示（带上 metadata 确保路由到正确 Thread）
             await self.send(
                 chat_id,
                 "⏳ 已向您发送私信，请在 DM 中审批危险命令。",
+                metadata=metadata,
             )
 
             return SendResult(success=True, message_id=data.get("id"))
