@@ -773,6 +773,9 @@ class MattermostApprovalAdapter(MattermostAdapter):
             from .models import resolve_provider_config
             prov_cfg = resolve_provider_config(provider_name)
 
+            # 先记录旧模型（必须在写入 override 之前）
+            old_model = self._get_current_model_from_key(session_key) or "(default)"
+
             if prov_cfg:
                 # 直接构建 override — 无需调用 switch_model
                 runner._session_model_overrides[session_key] = {
@@ -834,7 +837,6 @@ class MattermostApprovalAdapter(MattermostAdapter):
             # 这样 LLM 回答"当前模型"时会正确报告新模型
             if not hasattr(runner, "_pending_model_notes"):
                 runner._pending_model_notes = {}
-            old_model = self._get_current_model_from_key(session_key) or "(default)"
             _verify = runner._session_model_overrides.get(session_key, {})
             _new_provider = _verify.get("provider", provider_name)
             runner._pending_model_notes[session_key] = (

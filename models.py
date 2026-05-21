@@ -154,17 +154,17 @@ def resolve_provider_config(provider_name: str) -> Optional[Dict[str, str]]:
                     "base_url": cp.get("base_url", ""),
                     "api_key": api_key,
                     "api_mode": cp.get("api_mode", "") or "chat_completions",
-                    "provider": name,
+                    "provider": f"custom:{name}",
                 }
 
         # 回退到 model config (default provider)
         model_cfg = config.get("model", {})
-        if model_cfg.get("provider") == provider_name:
+        if model_cfg.get("provider") == provider_name or model_cfg.get("provider") == f"custom:{provider_name}":
             return {
                 "base_url": model_cfg.get("base_url", ""),
                 "api_key": "",  # default provider 的 key 由 runtime 解析
                 "api_mode": "chat_completions",
-                "provider": provider_name,
+                "provider": model_cfg.get("provider", provider_name),
             }
 
     except Exception as e:
