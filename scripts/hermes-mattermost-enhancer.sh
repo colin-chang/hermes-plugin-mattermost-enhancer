@@ -51,20 +51,20 @@ _do_patch() {
     local check="$3"
 
     if [[ ! -f "$file" ]]; then
-        warn "$1 不存在，跳过"
+        warn "$1 文件不存在，跳过"
         return 1
     fi
     if grep -q "$check" "$file" 2>/dev/null; then
-        ok "$label — 已应用，跳过"
+        ok "$label — 已经好了 ✅，跳过"
         return 0
     fi
 
     python3 - "$file"
     local rc=$?
     if [[ $rc -eq 0 ]]; then
-        ok "$label — 已应用"
+        ok "$label — 修复成功 ✅"
     else
-        warn "$label — 应用失败"
+        warn "$label — 修复失败 ❌，请检查 Hermes 是否正常安装"
     fi
     return $rc
 }
@@ -73,7 +73,7 @@ _do_patch() {
 
 patch_user_id() {
     _do_patch "gateway/run.py" \
-        "DM 审批传入 user_id 参数" \
+        "修复「审批卡片收不到」的问题" \
         'user_id=source.user_id' <<'PYEOF'
 import sys
 file_path = sys.argv[1]
@@ -111,7 +111,7 @@ PYEOF
 
 patch_progress_thread() {
     _do_patch "gateway/run.py" \
-        "工具进度消息进入 Mattermost Thread" \
+        "修复「任务进度跑到频道里」的问题" \
         'or source.platform == Platform.MATTERMOST' <<'PYEOF'
 import sys
 file_path = sys.argv[1]
@@ -148,38 +148,43 @@ PYEOF
 check_status() {
     echo ""
     echo "═══════════════════════════════════════════════════"
-    echo "  Mattermost Enhancer Patches 状态"
+    echo "  🔍 正在检查你的 Hermes 是否完整支持 Mattermost..."
     echo "═══════════════════════════════════════════════════"
     echo ""
 
     local ok_count=0 total=2
 
+    echo "  ── 检查 ①：审批卡片能不能发到你的私信 ──"
+    echo ""
     if grep -q 'user_id=source.user_id' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
-        ok "DM 审批传入 user_id 参数"
+        ok "审批卡片能正常发送 ✅（Hermes 知道该把卡片发给谁）"
         ok_count=$((ok_count + 1))
     else
-        warn "DM 审批传入 user_id 参数 — 未应用"
+        warn "审批卡片可能收不到 ⚠️（Hermes 还不知道该私信谁）"
     fi
 
+    echo ""
+    echo "  ── 检查 ②：任务进度会显示在 Thread 还是频道里 ──"
+    echo ""
     if grep -q 'or source.platform == Platform.MATTERMOST' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
-        ok "工具进度消息进入 Mattermost Thread"
+        ok "进度显示在 Thread 里 ✅（你在 Thread 里聊，进度就出现在 Thread 里）"
         ok_count=$((ok_count + 1))
     else
-        warn "工具进度消息进入 Mattermost Thread — 未应用"
+        warn "进度会跑到频道里 ⚠️（你在 Thread 里等结果，过程中却看不到任何反馈）"
     fi
 
     echo ""
     echo "───────────────────────────────────────────────────"
-    echo "  状态: ${ok_count}/${total} patches 已应用"
+    echo "  检查结果：${ok_count}/${total} 项通过"
     echo "───────────────────────────────────────────────────"
     echo ""
 
     if [[ $ok_count -eq $total ]]; then
-        ok "所有 patches 已应用，无需重新应用"
+        ok "一切正常，所有修复都已生效，不需要再做什么 ✨"
     elif [[ $ok_count -eq 0 ]]; then
-        warn "所有 patches 未应用，建议执行: $0 apply"
+        warn "两项修复都还没装，建议运行：$0 apply"
     else
-        warn "部分 patches 未应用，建议执行: $0 apply"
+        warn "还有一项修复没装完，建议运行：$0 apply"
     fi
 }
 
@@ -187,11 +192,11 @@ check_status() {
 
 restart_gateway() {
     echo ""
-    info "正在重启 Hermes Gateway..."
+    info "正在重启 Hermes..."
     if hermes gateway restart 2>&1; then
-        ok "Hermes Gateway 已重启 ✅"
+        ok "已重启 ✅ — 修复现在生效了！"
     else
-        warn "重启失败，请稍后手动执行 hermes gateway restart"
+        warn "重启失败，请稍后在终端手动执行：hermes gateway restart"
     fi
     echo ""
 }
@@ -199,17 +204,17 @@ restart_gateway() {
 # ── 应用所有 ──────────────────────────────────────────────────────────────
 
 apply_all() {
-    info "正在应用 Mattermost Enhancer 补丁..."
+    info "正在修复 Hermes 在 Mattermost 里的两个小问题..."
     echo ""
     patch_user_id
     patch_progress_thread
     echo ""
-    ok "补丁应用完成！"
+    ok "修复完成！"
     echo ""
 
     # 交互式重启询问
     echo "───────────────────────────────────────────────────"
-    echo -n "是否立即重启 Hermes Gateway 让补丁生效？[Y/n] "
+    echo -n "修复需要重启 Hermes 才能生效。是否现在重启？[Y/n] "
     read -r REPLY
     echo ""
 
@@ -218,7 +223,8 @@ apply_all() {
             restart_gateway
             ;;
         *)
-            warn "请稍后手动执行 hermes gateway restart 让补丁生效"
+            warn "已跳过。修复已经安装好了，但需要重启后才能生效。"
+            warn "请稍后手动执行：hermes gateway restart"
             echo ""
             ;;
     esac
@@ -240,8 +246,8 @@ case "$CMD" in
     *)
         echo "用法: $0 {apply|check|status}"
         echo ""
-        echo "  check   — 检查 patches 状态（默认）"
-        echo "  apply   — 应用 patches，完成后询问是否立即重启"
-        echo "  status  — 同 check，显示状态"
+        echo "  check   — 检查两个修复是否生效（默认）"
+        echo "  apply   — 安装修复，完成后询问是否立即重启 Gateway"
+        echo "  status  — 同 check"
         ;;
 esac
