@@ -1,50 +1,30 @@
 # mattermost-enhancer
 
-Mattermost 增强插件 for Hermes Agent — 将 DM 审批、模型切换、会话重置等功能以 Interactive Message 卡片交互方式集成到 Mattermost 工作流中。
+Hermes Platform Plugin — 将 Mattermost 所有自定义能力封装为插件，实现 **`mattermost.py` 源码零修改**。
 
-## 功能
+## 功能覆盖
 
-| 功能 | 触发方式 | 说明 |
-|------|---------|------|
-| **DM 审批** | 执行高危命令自动触发 | Allow Once / Allow Session / Always Allow / Deny，按钮卡片交互 |
-| **模型切换** | `/model` Slash Command | 下拉列表选择任意模型，仅影响当前 Thread |
-| **会话重置** | `/new` Slash Command | 清除模型 override 和 agent 缓存，开始新会话 |
+| 功能 | 触发方式 | 替代的原 Patch | 说明 |
+|------|---------|--------------|------|
+| **DM 审批** | 高危命令自动触发 | patch 7a-7d (~400行) | Allow Once / Session / Always / Deny 按钮卡片 |
+| **Thread root_id 修复** | 自动 | patch 6a-6d | CRT 模式下 root_id 指向 Thread 根帖子 |
+| **MEDIA 静默跳过** | 自动 | patch 10c | 文件不存在时静默跳过，不发噪声消息 |
+| **send_typing Thread 路由** | 自动 | patch 11 | typing 指示器跟随 Thread 上下文 |
+| **模型切换 /model** | Slash Command | 新功能 | 下拉列表选择模型，仅影响当前 Thread |
+| **会话重置 /new** | Slash Command | 新功能 | 清除 override + agent 缓存，新建会话 |
+| **Callback 服务器** | 自动 | patch 7c, 7d | HTTP 多路由：/mattermost/callback + /mm-command |
 
-## 架构
-
-```
-Mattermost 服务端
-  ├── 自定义 Slash 指令
-  │     /model → POST /mm-command
-  │     /new   → POST /mm-command
-  └── Interactive Message 回调
-        → POST /mattermost/callback
-
-Hermes Plugin: mattermost-enhancer (platform)
-  ├── adapter.py        # MattermostApprovalAdapter，覆盖内置适配器
-  ├── cards.py          # 模型选择器 / 新会话确认卡片
-  ├── models.py         # 模型列表管理（从 config.yaml providers 获取）
-  ├── session.py        # Session 定位与操作
-  └── callback_server.py # HTTP 回调服务器
-```
+> 仍需要 shell patch 的：`run.py` 的 `send_exec_approval` 传入 `user_id`（patch 8）和 `_progress_reply_to` Mattermost 判断（patch 8b）—— 这两个修改的是调用方，插件无法触及。
 
 ## 安装
 
-### 前置条件
+### 前置
 
 - Hermes Agent ≥ 0.14.0
-- Mattermost 服务端（自部署或 Cloud）
-- Mattermost Bot 账号（需 `post:all` 权限）
+- Mattermost Bot Token（需 `post:all` 权限）
+- Python ≥ 3.11
 
-### 步骤
-
-1. **复制插件**
-
-```bash
-cp -r mattermost-enhancer ~/.hermes/plugins/mattermost-enhancer
-```
-
-2. **启用插件**
+### 1. 启用插件
 
 编辑 `~/.hermes/config.yaml`：
 
@@ -54,95 +34,71 @@ plugins:
     - mattermost-enhancer
 ```
 
-3. **配置 Mattermost**
+### 2. 配置 Mattermost Slash Commands
 
-在 Mattermost System Console → Integrations → Slash Commands 中添加两条自定义指令：
+在 System Console → Integrations 添加：
 
-| 指令 | 请求 URL | 请求方式 |
-|------|---------|---------|
-| `/model` | `http://<hermes-host>:18065/mm-command` | POST |
-| `/new` | `http://<hermes-host>:18065/mm-command` | POST |
+| 指令 | 请求 URL |
+|------|---------|
+| `/model` | `http://<host>:18065/mm-command` |
+| `/new` | `http://<host>:18065/mm-command` |
 
-确保环境变量已配置：
+### 3. 环境变量
 
 ```bash
-export MATTERMOST_BOT_TOKEN="your-bot-token"
-export MATTERMOST_CALLBACK_BIND="0.0.0.0"
+export MATTERMOST_CALLBACK_BIND="0.0.0.0"   # Docker 用 host.docker.internal
 export MATTERMOST_CALLBACK_PORT="18065"
+# 可选：回调 HMAC 签名
+export MATTERMOST_CALLBACK_SECRET="your-secret"
+# 可选：限制可用用户
+export MATTERMOST_ALLOWED_USERS="user_id_1,user_id_2"
 ```
 
-4. **重启 Hermes Gateway**
+### 4. 重启
 
 ```bash
-hermes restart
+hermes gateway restart
 ```
 
-## 交互演示
-
-### /model — 模型切换
-
-```
-🔄 切换模型
-当前: zenmux/minimax-m2.7
-从下拉列表中选择目标模型：
-[当前: zenmux/minimax-m2.7  ▾]
-```
-
-选择后卡片更新为：
-
-```
-✅ 模型已切换: minimax-m2.7 → deepseek-v4-pro
-💡 重新选择请输入 /model
-```
-
-### /new — 新会话确认
-
-```
-🆕 创建新会话
-当前会话将被重置，模型 override 清除。
-[确认创建]  [取消]
-```
-
-### DM 审批
-
-```
-⚠️ 审批请求
-命令: terminal rm -rf /data/cache/*
-[Allow Once]  [Allow Session]  [Always Allow]  [Deny]
-```
-
-## 配置参考
-
-```yaml
-# ~/.hermes/config.yaml
-platforms:
-  mattermost:
-    bot_token: "${MATTERMOST_BOT_TOKEN}"
-    server_url: "http://127.0.0.1:8065"
-    reply_mode: thread      # 或 channel
-```
-
-## 文件结构
+## 插件结构
 
 ```
 mattermost-enhancer/
-├── plugin.yaml           # 插件元数据
-├── __init__.py           # 入口：register_platform()
-├── adapter.py            # MattermostApprovalAdapter
-├── cards.py              # Interactive Message 卡片渲染
-├── models.py             # 模型列表管理
-├── session.py            # Session 操作
-├── callback_server.py    # HTTP 回调服务器
-└── references/           # API 契约文档
+├── plugin.yaml              # 插件元数据 (kind=platform)
+├── __init__.py              # register_platform("mattermost")
+├── adapter.py               # MattermostApprovalAdapter (31 个方法, ~1180 行)
+│   ├── DM 审批              # send_exec_approval, _handle_callback, _verify_signature 等
+│   ├── Callback 服务器      # _start/_stop_callback_server, connect, disconnect
+│   ├── /model Slash 指令    # _handle_model_command, _switch_session_model 等 8 个方法
+│   ├── /new Slash 指令      # _handle_new_command, _reset_session 等 4 个方法
+│   ├── Thread root_id       # _resolve_root_id, send(), _send_local_file, _send_url_as_file
+│   ├── send_typing          # Thread 路由修复
+│   └── send_model_picker    # forward compat
+├── cards.py                 # Interactive Message 卡片（select 下拉 + button）
+├── models.py                # 模型列表管理（custom_providers 解析）
+├── session.py               # Session 定位（备用）
+├── callback_server.py       # 环境检查
+└── references/
+    └── api-contracts.md     # MM Slash Command & Interactive Message API 契约
 ```
 
-## 技术细节
+## 技术要点
 
-- **Session 区分**：Channel 顶层和 Thread 中的 `/model` `/new` 分别作用于不同 session，session_key 由 MM Slash Command payload 原生提供的 `root_id` 字段自动区分
-- **模型选择器**：使用 Mattermost select 下拉列表（非按钮分组），格式 `provider/model`
-- **Bot 身份**：卡片通过 Bot API (`_api_post`) 发帖，确保头像正确
-- **模型感知**：切换后通过 `_pending_model_notes` 注入提示，让 LLM 正确报告当前使用的模型
+- **Session 区分**：直接从 MM Slash Command payload 的 `root_id` 字段区分 Channel/Thread，无需 API 反查
+- **模型选择器**：Mattermost select 下拉列表（不限数量），name 字段作 placeholder 显示当前模型
+- **Bot 身份**：卡片通过 Bot API `_api_post` 发帖，避免用户头像显示
+- **模型感知**：`_pending_model_notes` 注入通知，LLM 正确报告当前模型
+- **provider 格式**：session override 使用 `custom:name` 格式，匹配 Gateway 解析链
+- **按钮防重复**：Deny/处理后返回空 `actions` 数组清空按钮
+- **5 按钮限制**：select 下拉突破 5 actions/attachment 限制
+
+## 迁移效果
+
+```
+mattermost.py: 1292 行 (4 patch 残留) → 852 行 (零修改)
+hermes-patches.sh: 移除 patches 6, 7, 10c (~673 行 shell 代码)
+```
 
 ## 许可
 
-MIT License
+MIT

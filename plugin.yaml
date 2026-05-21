@@ -1,6 +1,6 @@
 name: mattermost-enhancer
-version: 1.0.0
-description: "Mattermost 增强插件 — DM 审批 / 模型切换 /model / 会话重置 /new 的 Interactive Message 卡片交互"
+version: 2.0.0
+description: "Mattermost 增强插件 — DM 审批 / 模型切换 / 会话重置 / Thread root_id / MEDIA 静默跳过 / send_typing Thread 路由。覆盖内置 MattermostAdapter，实现 mattermost.py 源码零修改。"
 author: Colin Chang
 license: MIT
 kind: platform
