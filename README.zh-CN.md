@@ -143,7 +143,7 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 ---
 
-## 🚀 快速上手（5 步）
+## 🚀 快速上手（4 步）
 
 ### 前提条件
 
@@ -153,26 +153,17 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 ---
 
-### 第 1 步：下载插件
+### 第 1 步：安装插件
 
 ```bash
-git clone https://github.com/colin-chang/hermes-plugin-mattermost-enhancer.git \
-  ~/.hermes/plugins/mattermost-enhancer
+hermes plugins install colin-chang/hermes-plugin-mattermost-enhancer --enable
 ```
 
-### 第 2 步：启用插件
+这一条命令做了两件事：① 下载插件到 `~/.hermes/plugins/` ② 自动启用。
 
-打开 `~/.hermes/config.yaml`，在 `plugins.enabled` 下面加上一行：
+> 💡 也可以手动安装：`git clone https://github.com/colin-chang/hermes-plugin-mattermost-enhancer.git ~/.hermes/plugins/mattermost-enhancer`，再在 `config.yaml` 的 `plugins.enabled` 里加上 `mattermost-enhancer`。
 
-```yaml
-plugins:
-  enabled:
-    - mattermost-enhancer     # ← 加这行
-```
-
-> ⚠️ 注意：是 `mattermost-enhancer`，不是 `hermes-plugin-mattermost-enhancer`
-
-### 第 3 步：注册 Mattermost Slash 指令
+### 第 2 步：注册 Mattermost Slash 指令
 
 在 Mattermost **系统控制台 → 集成 → Slash 指令** 中添加两条：
 
@@ -183,7 +174,7 @@ plugins:
 
 > 🔧 如果 Mattermost 和 Hermes 在同一台机器上（Docker 部署），用 `http://host.docker.internal:18065/mm-command`
 
-### 第 4 步：配置环境变量
+### 第 3 步：配置环境变量
 
 打开 `~/.hermes/.env`，添加以下配置：
 
@@ -195,7 +186,6 @@ MATTERMOST_CALLBACK_PORT=18065
 
 # 回调 URL —— Mattermost 用这个地址把按钮点击/下拉选择发回给你的 Hermes
 # 🔧 Docker 部署（Mattermost 在容器里）：必须用 host.docker.internal
-#    → 你的 .env 里实际填的是这个：
 MATTERMOST_CALLBACK_URL=http://host.docker.internal:18065/mattermost/callback
 # 💻 本地部署（Mattermost 和 Hermes 在同一台机器、不用 Docker）：
 #    可以不填，插件会自动用 http://127.0.0.1:18065/mattermost/callback
@@ -207,10 +197,10 @@ MATTERMOST_CALLBACK_URL=http://host.docker.internal:18065/mattermost/callback
 
 > ⚠️ 如果你像大多数自部署用户一样，Mattermost 跑在 Docker 容器里，**`MATTERMOST_CALLBACK_URL` 必须填**，否则容器里的 Mattermost 无法回调到宿主机的 Hermes。
 
-### 第 5 步：运行配套脚本 + 重启
+### 第 4 步：运行配套脚本 + 重启
 
 ```bash
-cd ~/.hermes/plugins/mattermost-enhancer
+cd ~/.hermes/plugins/hermes-plugin-mattermost-enhancer
 
 # 先检查当前状态
 ./scripts/hermes-mattermost-enhancer.sh check
