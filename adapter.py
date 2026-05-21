@@ -19,6 +19,7 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from gateway.platforms.base import SendResult
 from gateway.platforms.mattermost import MattermostAdapter, MAX_POST_LENGTH
+from tools.approval import resolve_gateway_approval
 
 from .cards import (
     render_model_selector_card,
@@ -469,7 +470,6 @@ class MattermostApprovalAdapter(MattermostAdapter):
         if not choice:
             return {"ephemeral_text": f"Unknown action: {action}"}
 
-        from tools.approval import resolve_gateway_approval
         count = resolve_gateway_approval(session_key, choice)
         if count == 0:
             # 审批已被处理（重复点击）— 仍然返回 update 清空卡片按钮
