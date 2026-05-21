@@ -1,0 +1,755 @@
+"""
+MattermostApprovalAdapter — 继承内置 MattermostAdapter，扩展 DM 审批 + /model 卡片 + /new 确认。
+
+架构说明：
+  Mattermost 拦截所有 / 开头消息，必须注册 Slash Command 才能接收。
+  Slash Command payload 不含 root_id，需要通过 Mattermost API 反查 thread 上下文。
+
+修复的问题：
+  1. 重复消息 → Slash Command 返回空 ephemeral，Bot API 发帖（唯一可见消息）
+  2. 模型切换无效 → 直接从 custom_providers 构建 session override（绕过 switch_model 路由）
+  3. 显示用户头像 → 使用 _api_post("posts", ...) 以 Bot 身份发帖
+  4. 模型排列混乱 → 按 provider 分组渲染，按钮名去掉 provider 前缀
+"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
+
+from gateway.platforms.base import SendResult
+from gateway.platforms.mattermost import MattermostAdapter
+
+from .cards import (
+    render_model_selector_card,
+    render_new_session_confirm_card,
+    render_switch_success_card,
+    render_reset_success_card,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class MattermostApprovalAdapter(MattermostAdapter):
+    """Mattermost 适配器 — DM 审批 + /model 卡片 + /new 确认。"""
+
+    def __init__(self, config):
+        super().__init__(config)
+        self._model_picker_callbacks: Dict[str, Callable] = {}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 回调服务器（多路由）
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def _start_callback_server(self) -> None:
+        """启动 HTTP callback server。
+        路由：
+          POST /mattermost/callback → 按钮回调（审批 + 模型切换 + 会话重置）
+          POST /mm-command          → Slash 指令（/model + /new）
+        """
+        import asyncio as _asyncio
+        adapter_self = self
+
+        async def _handler(reader: _asyncio.StreamReader, writer: _asyncio.StreamWriter):
+            try:
+                request_data = await _asyncio.wait_for(reader.read(65536), timeout=10.0)
+                if not request_data:
+                    writer.close()
+                    return
+
+                request_text = request_data.decode("utf-8", errors="replace")
+                headers, _, body = request_text.partition("\r\n\r\n")
+                request_line = headers.split("\r\n")[0]
+                parts = request_line.split(" ", 2)
+                if len(parts) < 2:
+                    writer.close()
+                    return
+                method, path = parts[0], parts[1]
+
+                if method != "POST":
+                    writer.write(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
+                    await writer.drain()
+                    writer.close()
+                    return
+
+                if path == "/mattermost/callback":
+                    result = await adapter_self._route_callback(headers, body)
+                elif path == "/mm-command":
+                    result = await adapter_self._route_slash_command(body)
+                else:
+                    writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                    await writer.drain()
+                    writer.close()
+                    return
+
+                response_body = json.dumps(result).encode("utf-8")
+                response = (
+                    f"HTTP/1.1 200 OK\r\n"
+                    f"Content-Type: application/json\r\n"
+                    f"Content-Length: {len(response_body)}\r\n\r\n"
+                ).encode("utf-8") + response_body
+                writer.write(response)
+                await writer.drain()
+                writer.close()
+            except Exception:
+                logger.exception("Unhandled error in callback server handler")
+                try:
+                    err_body = json.dumps({"ephemeral_text": "⚠️ Internal error"}).encode("utf-8")
+                    err_resp = (
+                        f"HTTP/1.1 200 OK\r\n"
+                        f"Content-Type: application/json\r\n"
+                        f"Content-Length: {len(err_body)}\r\n\r\n"
+                    ).encode("utf-8") + err_body
+                    writer.write(err_resp)
+                    await writer.drain()
+                except Exception:
+                    pass
+                writer.close()
+
+        server = await _asyncio.start_server(
+            _handler, host=adapter_self._callback_bind, port=adapter_self._callback_port,
+        )
+        adapter_self._callback_server = server
+        logger.info(
+            "MattermostApproval callback server on %s:%s (routes: /mattermost/callback, /mm-command)",
+            adapter_self._callback_bind, adapter_self._callback_port,
+        )
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 路由: Interactive Message 回调
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def _route_callback(self, headers: str, body: str) -> Dict[str, Any]:
+        """处理 POST /mattermost/callback。"""
+        signature = ""
+        for line in headers.split("\r\n"):
+            if line.lower().startswith("x-mattermost-signature:"):
+                signature = line.split(":", 1)[1].strip()
+                break
+
+        if self._callback_secret:
+            if not signature or not self._verify_signature(body.encode("utf-8"), signature):
+                return {"ephemeral_text": "Unauthorized"}
+
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return {"ephemeral_text": "Invalid JSON"}
+
+        return await self._handle_callback(payload)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 路由: Slash 指令
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def _route_slash_command(self, body: str) -> Dict[str, Any]:
+        """处理 POST /mm-command（/model + /new）。
+
+        关键设计：
+          Slash Command 的 HTTP response 以用户身份显示 ephemeral（MM 设计限制）。
+          为避免用户头像发送 Bot 消息的困惑，HTTP response 返回空 ephemeral，
+          所有可见内容通过 Bot API 发帖。
+        """
+        from urllib.parse import unquote_plus
+        params: Dict[str, str] = {}
+        for pair in body.split("&"):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                params[k] = unquote_plus(v)
+
+        command = params.get("command", "").lstrip("/")
+        channel_id = params.get("channel_id", "")
+        user_id = params.get("user_id", "")
+        # MM Slash Command payload 包含 root_id 字段！
+        # - 在 Thread 中发送时，root_id = thread 的 root post ID
+        # - 在 Channel 顶层发送时，root_id = 空字符串
+        root_id = params.get("root_id", "") or None
+
+        logger.info("Slash command: /%s user=%s channel=%s root_id=%s",
+                    command, user_id[:8], channel_id[:8], root_id or "(channel-level)")
+
+        # 校验权限
+        allowed_users = self._get_allowed_users()
+        if allowed_users and user_id not in allowed_users:
+            return {"response_type": "ephemeral", "text": "⛔ Unauthorized"}
+
+        if command == "model":
+            return await self._handle_model_command(channel_id, user_id, root_id)
+        elif command == "new":
+            return await self._handle_new_command(channel_id, user_id, root_id)
+
+        return {"response_type": "ephemeral", "text": f"Unknown command: /{command}"}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Slash 指令处理
+    # ══════════════════════════════════════════════════════════════════════
+
+    # NOTE: _find_user_thread_root_id 已移除 — MM Slash Command payload
+    # 原生包含 root_id 字段，无需 API 反查。
+
+    async def _post_card_in_thread(
+        self, channel_id: str, root_id: Optional[str], card: Dict[str, Any],
+    ) -> Optional[str]:
+        """通过 Bot API 在 thread 中发送 Interactive Message 卡片。返回 post_id。
+
+        关键：message 留空，所有可见内容只在 props.attachments 中。
+        如果 message 和 props.attachments 都有内容，MM 会重复显示。
+        """
+        attachments = card.get("attachments", [])
+
+        payload: Dict[str, Any] = {
+            "channel_id": channel_id,
+            "message": "",  # 留空，避免与 props 重复显示
+            "props": {"attachments": attachments},
+        }
+
+        if root_id:
+            payload["root_id"] = root_id
+
+        try:
+            data = await self._api_post("posts", payload)
+            if data and "id" in data:
+                return data["id"]
+            logger.error("Failed to post card: %s", data)
+            return None
+        except Exception as e:
+            logger.error("Error posting card: %s", e)
+            return None
+
+    async def _update_bot_post(
+        self, post_id: str, message: str, props: Dict[str, Any],
+    ) -> bool:
+        """通过 Bot API 更新帖子内容。"""
+        try:
+            payload = {
+                "message": message,
+                "props": props,
+            }
+            data = await self._api_post(f"posts/{post_id}", payload, method="PUT")
+            return bool(data and "id" in data)
+        except Exception as e:
+            logger.error("Error updating post %s: %s", post_id, e)
+            return False
+
+    async def _handle_model_command(
+        self, channel_id: str, user_id: str, root_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """处理 /model Slash Command。
+
+        root_id 来自 MM Slash Command payload：
+          - Thread 中发送 → root_id = thread root post ID
+          - Channel 顶层发送 → root_id = None
+        """
+        # 1. 获取可用模型（按 provider 分组）
+        from .models import get_models_by_provider
+        provider_groups = get_models_by_provider()
+
+        # 2. 当前模型
+        current_model = self._get_current_model_for_session(channel_id, root_id)
+
+        # 4. 渲染卡片（分组模式）
+        callback_url = self._callback_url or (
+            f"http://{self._callback_bind}:{self._callback_port}/mattermost/callback"
+        )
+        card = render_model_selector_card(
+            callback_url=callback_url,
+            channel_id=channel_id,
+            user_id=user_id,
+            current_model=current_model,
+            provider_groups=provider_groups,
+        )
+
+        # 5. 注入 session_key + provider 到按钮 context
+        session_key = self._build_session_key(channel_id, root_id)
+        self._inject_model_context(card, session_key)
+
+        # 6. Bot API 发帖到 thread（Bot 头像，非用户头像）
+        post_id = await self._post_card_in_thread(channel_id, root_id, card)
+
+        if post_id:
+            logger.info("Model picker posted: session=%s post=%s groups=%d",
+                        session_key, post_id, len(provider_groups))
+            # 返回空 ephemeral — 所有可见内容在 Bot 帖子中
+            return {}
+
+        return {"response_type": "ephemeral", "text": "❌ 发送模型选择器失败，请稍后重试"}
+
+    async def _handle_new_command(
+        self, channel_id: str, user_id: str, root_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """处理 /new Slash Command。
+
+        root_id 来自 MM Slash Command payload：
+          - Thread 中发送 → root_id = thread root post ID
+          - Channel 顶层发送 → root_id = None
+        """
+        callback_url = self._callback_url or (
+            f"http://{self._callback_bind}:{self._callback_port}/mattermost/callback"
+        )
+        card = render_new_session_confirm_card(
+            callback_url=callback_url,
+            channel_id=channel_id,
+            user_id=user_id,
+        )
+
+        session_key = self._build_session_key(channel_id, root_id)
+        self._inject_session_key(card, session_key)
+
+        post_id = await self._post_card_in_thread(channel_id, root_id, card)
+
+        if post_id:
+            logger.info("New session confirm posted: session=%s post=%s", session_key, post_id)
+            # 保存 post_id 供后续回调更新
+            self._new_confirm_posts = getattr(self, "_new_confirm_posts", {})
+            self._new_confirm_posts[session_key] = post_id
+            # 返回空 ephemeral
+            return {}
+
+        return {"response_type": "ephemeral", "text": "❌ 发送确认卡片失败，请稍后重试"}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Session 上下文辅助
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _build_session_key(self, channel_id: str, root_id: Optional[str]) -> str:
+        """构建 session_key，对齐 Gateway 的 build_session_key 格式。
+        格式: agent:main:mattermost:group:<channel_id>[:<root_id>]
+        """
+        key = f"agent:main:mattermost:group:{channel_id}"
+        if root_id:
+            key += f":{root_id}"
+        return key
+
+    def _get_current_model_for_session(
+        self, channel_id: str, root_id: Optional[str],
+    ) -> str:
+        """获取当前 session 使用的模型名。"""
+        session_key = self._build_session_key(channel_id, root_id)
+
+        # 先查 session override
+        try:
+            from gateway.run import _gateway_runner_ref
+            runner = _gateway_runner_ref()
+            if runner:
+                override = runner._session_model_overrides.get(session_key, {})
+                if override:
+                    return override.get("model", "")
+        except Exception:
+            pass
+
+        # 回退到 config 默认
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            model_cfg = cfg.get("model", {})
+            if isinstance(model_cfg, dict):
+                return model_cfg.get("default", "")
+        except Exception:
+            pass
+
+        return ""
+
+    def _inject_model_context(
+        self, card: Dict[str, Any], session_key: str,
+    ) -> None:
+        """在模型选择卡片 context 中注入 session_key + provider_name。
+
+        支持 select 和 button 两种 action 类型：
+        - select: context 是共享的，selected_option 由 MM 在回调时添加
+        - button: 每个 button 的 context 独立，包含 model_id 和 provider_name
+        """
+        from .models import _resolve_provider_for_model
+
+        for att in card.get("attachments", []):
+            for action in att.get("actions", []):
+                ctx = action.get("integration", {}).get("context", {})
+
+                # select 类型：context 是共享的，不需要 model_id/provider_name
+                # 这些在回调时通过 selected_option 获取
+                if action.get("type") == "select":
+                    ctx["session_key"] = session_key
+                    continue
+
+                # button 类型：每个按钮的 context 包含 model_id
+                model_id = ctx.get("model_id", "")
+                ctx["session_key"] = session_key
+                if model_id:
+                    ctx["provider_name"] = _resolve_provider_for_model(model_id)
+
+    def _inject_session_key(self, card: Dict[str, Any], session_key: str) -> None:
+        """在卡片按钮 context 中注入 session_key。"""
+        for att in card.get("attachments", []):
+            for action in att.get("actions", []):
+                ctx = action.get("integration", {}).get("context", {})
+                ctx["session_key"] = session_key
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 回调处理（Interactive Message 按钮）
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def _handle_callback(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """处理按钮回调 — 审批 + 模型切换 + 会话重置。"""
+        context = payload.get("context", {})
+        action = context.get("action", "")
+
+        # ── 模型切换 ──
+        if action == "cmd_model_switch":
+            return await self._handle_model_switch_callback(payload)
+
+        # ── 会话重置确认 ──
+        if action == "cmd_new_confirm":
+            return await self._handle_new_confirm_callback(payload)
+
+        # ── 会话重置取消 ──
+        if action == "cmd_new_cancel":
+            return {"update": {"message": "❌ 已取消重置", "props": {}}}
+
+        # ── DM 审批 ──
+        session_key = context.get("session_key", "")
+        if not action or not session_key:
+            return {"ephemeral_text": "Invalid callback data"}
+
+        user_id = payload.get("user_id", "")
+        allowed_users = self._get_allowed_users()
+        if allowed_users and user_id not in allowed_users:
+            return {"ephemeral_text": "Unauthorized"}
+
+        choice_map = {
+            "approve_once": "once",
+            "approve_session": "session",
+            "approve_always": "always",
+            "deny": "deny",
+        }
+        choice = choice_map.get(action)
+        if not choice:
+            return {"ephemeral_text": f"Unknown action: {action}"}
+
+        from tools.approval import resolve_gateway_approval
+        count = resolve_gateway_approval(session_key, choice)
+        if count == 0:
+            # 审批已被处理（重复点击）— 仍然返回 update 清空卡片按钮
+            # 防止用户继续点击看到 "No pending approval found" 错误
+            return {
+                "update": {
+                    "message": "⚠️ 此审批已处理",
+                    "props": {
+                        "attachments": [{
+                            "actions": [],  # 清空按钮
+                        }],
+                    },
+                },
+            }
+
+        label_map = {
+            "once": "✅ Approved — Allow Once",
+            "session": "✅ Approved — Allow Session",
+            "always": "✅ Approved — Always Allow",
+            "deny": "❌ Denied",
+        }
+        cmd = context.get("command", "")
+        cmd_display = f"\n```\n{cmd}\n```" if cmd else ""
+        _update_msg = f"{label_map.get(choice, choice)}{cmd_display}"
+
+        logger.info("Approval callback: %s → %s (session %s), %d resolved",
+                     action, choice, session_key[:40], count)
+
+        # update 响应替换卡片内容，同时清空 actions 防止重复点击
+        # MM 的 update 只替换 message+props，按钮仍在 — 必须在 props 中返回空 actions
+        return {
+            "update": {
+                "message": _update_msg,
+                "props": {
+                    "attachments": [{
+                        "actions": [],  # 清空按钮，防止 Deny 后重复点击
+                    }],
+                },
+            },
+        }
+
+    # ── 模型切换回调 ──
+
+    async def _handle_model_switch_callback(
+        self, payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """处理模型选择回调（支持下拉列表 select + 按钮 button）。
+
+        Select 下拉列表：context 中包含 selected_option 字段（值为 option.value）
+        Button 按钮：context 中包含 model_id 字段
+        """
+        context = payload.get("context", {})
+
+        # 兼容 select 和 button 两种模式
+        model_id = context.get("selected_option", "") or context.get("model_id", "")
+        session_key = context.get("session_key", "")
+        provider_name = context.get("provider_name", "")
+        user_id = payload.get("user_id", "")
+
+        logger.info(
+            "Model switch callback: model=%s session=%s provider=%s",
+            model_id, session_key, provider_name,
+        )
+
+        allowed_users = self._get_allowed_users()
+        if allowed_users and user_id not in allowed_users:
+            return {"ephemeral_text": "Unauthorized"}
+
+        if not model_id or not session_key:
+            return {"ephemeral_text": "Missing model_id or session context"}
+
+        # 如果 provider_name 为空（select 模式可能没有注入），从 model_id 解析
+        if not provider_name:
+            from .models import _resolve_provider_for_model
+            provider_name = _resolve_provider_for_model(model_id)
+
+        # 获取旧模型名（用于显示切换路径）
+        old_model = self._get_current_model_from_key(session_key)
+
+        success, message = await self._switch_session_model(
+            session_key, model_id, provider_name,
+        )
+
+        if success:
+            old_display = old_model.split("/", 1)[-1] if "/" in old_model else old_model
+            new_display = model_id.split("/", 1)[-1] if "/" in model_id else model_id
+            return {
+                "update": {
+                    "message": f"✅ 模型已切换: {old_display or '(default)'} → {new_display}\n💡 重新选择请输入 `/model`",
+                    "props": {},
+                },
+            }
+        else:
+            return {"ephemeral_text": f"切换失败: {message}"}
+
+    # ── 会话重置回调 ──
+
+    async def _handle_new_confirm_callback(
+        self, payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """处理会话重置确认按钮回调。"""
+        context = payload.get("context", {})
+        session_key = context.get("session_key", "")
+        user_id = payload.get("user_id", "")
+
+        allowed_users = self._get_allowed_users()
+        if allowed_users and user_id not in allowed_users:
+            return {"ephemeral_text": "Unauthorized"}
+
+        if not session_key:
+            return {"ephemeral_text": "Missing session context"}
+
+        success, message = await self._reset_session(session_key)
+
+        if success:
+            # 只在 message 中放内容，props 清空避免重复
+            return {
+                "update": {
+                    "message": "✅ 会话已重置，新会话已创建，对话上下文已清空。",
+                    "props": {},
+                },
+            }
+        else:
+            return {"ephemeral_text": f"重置失败: {message}"}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 核心操作：模型切换 + 会话重置
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _get_current_model_from_key(self, session_key: str) -> str:
+        """从 session override 或 config 获取当前模型名。"""
+        try:
+            from gateway.run import _gateway_runner_ref
+            runner = _gateway_runner_ref()
+            if runner:
+                override = runner._session_model_overrides.get(session_key, {})
+                if override:
+                    return override.get("model", "")
+        except Exception:
+            pass
+
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            return cfg.get("model", {}).get("default", "")
+        except Exception:
+            return ""
+
+    async def _switch_session_model(
+        self, session_key: str, model_id: str, provider_name: str,
+    ) -> Tuple[bool, str]:
+        """执行模型切换 — 直接从 custom_providers 配置构建 session override。
+
+        绕过 switch_model() 的复杂路由逻辑，直接读取 provider 配置。
+        这确保 api_key 正确解析、响应速度快、provider 正确匹配。
+        """
+        try:
+            from gateway.run import _gateway_runner_ref
+            runner = _gateway_runner_ref()
+            if not runner:
+                return False, "GatewayRunner not available"
+
+            # 从 custom_providers 配置直接解析 provider 连接信息
+            from .models import resolve_provider_config
+            prov_cfg = resolve_provider_config(provider_name)
+
+            if prov_cfg:
+                # 直接构建 override — 无需调用 switch_model
+                runner._session_model_overrides[session_key] = {
+                    "model": model_id,
+                    "provider": prov_cfg["provider"],
+                    "base_url": prov_cfg["base_url"],
+                    "api_key": prov_cfg["api_key"],
+                    "api_mode": prov_cfg["api_mode"],
+                }
+            else:
+                # provider 不在 custom_providers 中 — 回退到 switch_model
+                logger.warning(
+                    "Provider '%s' not in custom_providers, falling back to switch_model for %s",
+                    provider_name, model_id,
+                )
+                from hermes_cli.config import load_config
+                cfg = load_config()
+                model_cfg = cfg.get("model", {})
+                user_provs = cfg.get("providers")
+                try:
+                    from hermes_cli.config import get_compatible_custom_providers
+                    custom_provs = get_compatible_custom_providers(cfg)
+                except Exception:
+                    custom_provs = cfg.get("custom_providers")
+
+                override = runner._session_model_overrides.get(session_key, {})
+                current_provider = override.get("provider", model_cfg.get("provider", "openrouter"))
+                current_model = override.get("model", model_cfg.get("default", ""))
+                current_base_url = override.get("base_url", model_cfg.get("base_url", ""))
+                current_api_key = override.get("api_key", "")
+
+                from hermes_cli.model_switch import switch_model
+                result = switch_model(
+                    raw_input=model_id,
+                    current_provider=current_provider,
+                    current_model=current_model,
+                    current_base_url=current_base_url,
+                    current_api_key=current_api_key,
+                    user_providers=user_provs,
+                    custom_providers=custom_provs,
+                    explicit_provider=provider_name or None,
+                )
+
+                if not result.success:
+                    return False, result.error_message or "switch_model failed"
+
+                runner._session_model_overrides[session_key] = {
+                    "model": result.new_model,
+                    "provider": result.target_provider,
+                    "base_url": result.base_url,
+                    "api_key": result.api_key,
+                    "api_mode": result.api_mode,
+                }
+
+            # 清除缓存的 agent
+            runner._evict_cached_agent(session_key)
+
+            # 注入 model note — 让 LLM 知道自己被切换了
+            # 这样 LLM 回答"当前模型"时会正确报告新模型
+            if not hasattr(runner, "_pending_model_notes"):
+                runner._pending_model_notes = {}
+            old_model = self._get_current_model_from_key(session_key) or "(default)"
+            _verify = runner._session_model_overrides.get(session_key, {})
+            _new_provider = _verify.get("provider", provider_name)
+            runner._pending_model_notes[session_key] = (
+                f"[Note: model was just switched from {old_model} to {model_id} "
+                f"via {_new_provider}. "
+                f"Adjust your self-identification accordingly.]"
+            )
+
+            # 验证 override 是否真的写入了
+            verify = runner._session_model_overrides.get(session_key)
+            if verify:
+                logger.info(
+                    "Model switched: session=%s → %s provider=%s api_key_len=%d override_verified=YES",
+                    session_key, model_id,
+                    verify.get("provider", "?"),
+                    len(verify.get("api_key", "")),
+                )
+            else:
+                logger.error(
+                    "Model switch FAILED to persist: session=%s model=%s override_keys=%s",
+                    session_key, model_id,
+                    list(runner._session_model_overrides.keys())[:5],
+                )
+            return True, model_id
+
+        except Exception as e:
+            logger.error("Model switch failed: %s", e, exc_info=True)
+            return False, str(e)
+
+    async def _reset_session(self, session_key: str) -> Tuple[bool, str]:
+        """执行会话重置，通过 GatewayRunner。"""
+        try:
+            from gateway.run import _gateway_runner_ref
+            runner = _gateway_runner_ref()
+            if not runner:
+                return False, "GatewayRunner not available"
+
+            # 清除 session override
+            runner._session_model_overrides.pop(session_key, None)
+
+            # 清除缓存 agent
+            runner._evict_cached_agent(session_key)
+
+            # 重置 session store
+            if hasattr(runner, "session_store"):
+                runner.session_store.reset_session(session_key)
+
+            # 清除 reasoning override
+            if hasattr(runner, "_set_session_reasoning_override"):
+                runner._set_session_reasoning_override(session_key, None)
+
+            # 清除 pending model notes
+            if hasattr(runner, "_pending_model_notes"):
+                runner._pending_model_notes.pop(session_key, None)
+
+            # 清除 session boundary security state
+            if hasattr(runner, "_clear_session_boundary_security_state"):
+                runner._clear_session_boundary_security_state(session_key)
+
+            logger.info("Session reset: session=%s", session_key)
+            return True, "Session reset"
+
+        except Exception as e:
+            logger.error("Session reset failed: %s", e, exc_info=True)
+            return False, str(e)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Gateway 标准钩子（forward compat，当前因 Mattermost 拦截 / 不会触发）
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def send_model_picker(
+        self,
+        chat_id: str,
+        providers: list,
+        current_model: str,
+        current_provider: str,
+        session_key: str,
+        on_model_selected: Callable[[str, str, str], Coroutine[Any, Any, str]],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Gateway 标准 hook — 当前 Mattermost 拦截 / 消息，此方法不会被调用。
+        保留用于未来兼容（如 Mattermost 改进 Slash Command 支持时）。
+        """
+        return SendResult(success=False, error="Use Slash Command /model instead")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 父类方法覆写（修复内置适配器的 Bug）
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None):
+        """覆写父类：将 typing 指示器发送到正确的 Thread 内。
+
+        内置 MattermostAdapter.send_typing() 只传 channel_id，
+        在 reply_mode=thread 时 typing 指示器错误地显示在频道而非 Thread 内。
+        Mattermost API 支持 parent_id 参数指定 Thread。
+        """
+        body: Dict[str, Any] = {"channel_id": chat_id}
+        if metadata and metadata.get("thread_id"):
+            body["parent_id"] = metadata["thread_id"]
+        await self._api_post(f"users/{self._bot_user_id}/typing", body)

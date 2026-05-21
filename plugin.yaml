@@ -1,0 +1,10 @@
+name: mattermost-enhancer
+version: 1.0.0
+description: "Mattermost 增强插件 — DM 审批 / 模型切换 /model / 会话重置 /new 的 Interactive Message 卡片交互"
+author: Colin Chang
+license: MIT
+kind: platform
+min_hermes_version: "0.14.0"
+platforms:
+  - mattermost
+hooks: []
