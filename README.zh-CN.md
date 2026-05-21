@@ -1,4 +1,4 @@
-# Hermes  Mattermost Enhancer Plugin
+# Hermes Mattermost Enhancer Plugin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Hermes](https://img.shields.io/badge/Hermes-≥%200.14.0-blue)](https://github.com/nousresearch/hermes-agent)
@@ -305,6 +305,13 @@ mattermost-enhancer/
 ```
 
 ---
+
+> 💡 **Docker 自部署小贴士** — 如果你用 Docker 跑 Mattermost，这几点可以帮你少踩坑：
+>
+> - **消息不实时渲染？** 把 `config.json` 里的 `AllowCorsFrom` 设为 `http://127.0.0.1:8065`，重启容器。浏览器 WebSocket 被 CORS 拦截了。
+> - **`/model` 没反应？** `.env` 的 `MATTERMOST_CALLBACK_URL` 必须用 `http://host.docker.internal:18065/mattermost/callback`。容器里的 `127.0.0.1` 是容器自己，不是宿主机。
+> - **图片裂了？** `SiteURL` 要与浏览器地址栏的 URL 一致。本地用 `127.0.0.1`，远程用域名，不要混搭。
+> - **偶尔断连？** 容器内存给到 2GB 以上，`docker stats mm-app` 可以看当前用量。
 
 ## 📄 许可
 

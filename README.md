@@ -1,4 +1,4 @@
-# Hermes  Mattermost Enhancer Plugin
+# Hermes Mattermost Enhancer Plugin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Hermes](https://img.shields.io/badge/Hermes-≥%200.14.0-blue)](https://github.com/nousresearch/hermes-agent)
@@ -304,6 +304,13 @@ mattermost-enhancer/
 ```
 
 ---
+
+> 💡 **Docker Self-Hosting Tips** — If you run Mattermost in Docker, these will save you some headaches:
+>
+> - **Messages not live-updating?** Set `AllowCorsFrom` to `http://127.0.0.1:8065` in `config.json` and restart the container. The browser WebSocket is being blocked by CORS.
+> - **`/model` not responding?** `MATTERMOST_CALLBACK_URL` in `.env` must use `http://host.docker.internal:18065/mattermost/callback`. Inside a container, `127.0.0.1` points to the container itself, not the host.
+> - **Images showing as broken?** Make `SiteURL` match the URL in your browser's address bar. Local = `127.0.0.1`, remote = your domain — don't mix them.
+> - **Random disconnects?** Give the container at least 2GB of memory. Run `docker stats mm-app` to check current usage.
 
 ## 📄 License
 
