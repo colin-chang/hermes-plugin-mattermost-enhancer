@@ -168,18 +168,29 @@ In **System Console → Integrations → Slash Commands**, add two:
 
 > 🔧 If Mattermost runs in Docker on the same machine: use `http://host.docker.internal:18065/mm-command`
 
-### Step 4: Set Environment Variables (Optional)
+### Step 4: Set Environment Variables
+
+Open `~/.hermes/.env` and add:
 
 ```bash
-export MATTERMOST_CALLBACK_BIND="0.0.0.0"
-export MATTERMOST_CALLBACK_PORT="18065"
+# ═══ Required ═══
+# Callback server bind address and port
+MATTERMOST_CALLBACK_BIND=0.0.0.0
+MATTERMOST_CALLBACK_PORT=18065
 
-# Optional: HMAC signature verification
-export MATTERMOST_CALLBACK_SECRET="your-secret"
+# Callback URL — Mattermost uses this to send button clicks / dropdown selections
+# back to your Hermes instance
+# 🔧 Docker setup (Mattermost in a container): MUST use host.docker.internal
+MATTERMOST_CALLBACK_URL=http://host.docker.internal:18065/mattermost/callback
+# 💻 Local setup (Mattermost + Hermes on same machine, no Docker):
+#    Can leave blank — plugin auto-falls-back to http://127.0.0.1:18065/mattermost/callback
 
-# Optional: restrict DM approvals to specific users
-export MATTERMOST_ALLOWED_USERS="user_id_1,user_id_2"
+# ═══ Optional ═══
+# HMAC signature verification (skip verification if left empty)
+# MATTERMOST_CALLBACK_SECRET=your-secret
 ```
+
+> ⚠️ If Mattermost runs in Docker (most self-hosted setups), **`MATTERMOST_CALLBACK_URL` is required**. Without it, the Docker container can't reach Hermes on the host machine.
 
 ### Step 5: Run Companion Script + Restart
 

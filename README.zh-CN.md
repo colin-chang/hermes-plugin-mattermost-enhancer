@@ -183,19 +183,29 @@ plugins:
 
 > 🔧 如果 Mattermost 和 Hermes 在同一台机器上（Docker 部署），用 `http://host.docker.internal:18065/mm-command`
 
-### 第 4 步：配置环境变量（可选）
+### 第 4 步：配置环境变量
+
+打开 `~/.hermes/.env`，添加以下配置：
 
 ```bash
-# 审批私信回调服务器绑定地址和端口（默认值通常够用）
-export MATTERMOST_CALLBACK_BIND="0.0.0.0"
-export MATTERMOST_CALLBACK_PORT="18065"
+# ═══ 必填 ═══
+# 回调服务器绑定地址和端口
+MATTERMOST_CALLBACK_BIND=0.0.0.0
+MATTERMOST_CALLBACK_PORT=18065
 
-# 可选：HMAC 签名验证（增强安全）
-export MATTERMOST_CALLBACK_SECRET="你的密钥"
+# 回调 URL —— Mattermost 用这个地址把按钮点击/下拉选择发回给你的 Hermes
+# 🔧 Docker 部署（Mattermost 在容器里）：必须用 host.docker.internal
+#    → 你的 .env 里实际填的是这个：
+MATTERMOST_CALLBACK_URL=http://host.docker.internal:18065/mattermost/callback
+# 💻 本地部署（Mattermost 和 Hermes 在同一台机器、不用 Docker）：
+#    可以不填，插件会自动用 http://127.0.0.1:18065/mattermost/callback
 
-# 可选：限制哪些用户可以用审批功能
-export MATTERMOST_ALLOWED_USERS="user_id_1,user_id_2"
+# ═══ 可选 ═══
+# HMAC 签名验证（增强安全，不填则跳过验证）
+# MATTERMOST_CALLBACK_SECRET=你的密钥
 ```
+
+> ⚠️ 如果你像大多数自部署用户一样，Mattermost 跑在 Docker 容器里，**`MATTERMOST_CALLBACK_URL` 必须填**，否则容器里的 Mattermost 无法回调到宿主机的 Hermes。
 
 ### 第 5 步：运行配套脚本 + 重启
 
