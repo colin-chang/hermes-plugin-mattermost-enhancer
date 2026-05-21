@@ -87,6 +87,7 @@ These are bugs fixed by this plugin (and its companion script). Each entry shows
 | **2** | Missing-file errors spam the chat | `File not found: /tmp/img.png` fills your conversation | Silently skipped — no noise |
 | **3** | Typing indicator at channel, not Thread | You wait in a Thread but see no "typing..." feedback | Typing indicator follows Thread context |
 | **4** | DM approval had no user_id | Approval cards couldn't be delivered to you | user_id properly passed, cards arrive |
+| **5** | Tool-chain progress leaks to channel | Multi-step tasks show progress ("Searching...", "Reading file...") only in the main channel, not your Thread | You wait in a Thread with zero visibility into what's happening — result just pops out at the end 💀 | Progress messages appear in the correct Thread, you see every step |
 
 ---
 
@@ -108,7 +109,7 @@ You → Mattermost → Hermes Gateway (the robot's brain) → AI model
 - ✅ **Plugin territory:** How Hermes replies to you (adapter methods). All features above are plugin-based.
 - ❌ **Outside plugin reach:** How Hermes gets *called* in the first place (caller-side code). This is deep in `gateway/run.py`.
 
-Bug #3 (typing routing) and Bug #4 (DM user_id) are in the caller-side code — the plugin simply can't reach them.
+Bug #4 (DM user_id) and Bug #5 (tool progress routing) are in the caller-side code — the plugin simply can't reach them.
 
 ### What the Companion Script Does
 
