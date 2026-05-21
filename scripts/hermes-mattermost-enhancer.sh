@@ -51,20 +51,20 @@ _do_patch() {
     local check="$3"
 
     if [[ ! -f "$file" ]]; then
-        warn "$1 文件不存在，跳过"
+        warn "File not found: $1, skipped（文件不存在，已跳过）"
         return 1
     fi
     if grep -q "$check" "$file" 2>/dev/null; then
-        ok "$label — 已经好了 ✅，跳过"
+        ok "$label — already applied ✅, skipping（已经好了，跳过）"
         return 0
     fi
 
     python3 - "$file"
     local rc=$?
     if [[ $rc -eq 0 ]]; then
-        ok "$label — 修复成功 ✅"
+        ok "$label — applied successfully ✅（修复成功）"
     else
-        warn "$label — 修复失败 ❌，请检查 Hermes 是否正常安装"
+        warn "$label — failed ❌, check if Hermes is properly installed（修复失败，请检查 Hermes 是否正常安装）"
     fi
     return $rc
 }
@@ -73,7 +73,7 @@ _do_patch() {
 
 patch_user_id() {
     _do_patch "gateway/run.py" \
-        "修复「审批卡片收不到」的问题" \
+        "Fix: approval card not being delivered（修复「审批卡片收不到」的问题）" \
         'user_id=source.user_id' <<'PYEOF'
 import sys
 file_path = sys.argv[1]
@@ -111,7 +111,7 @@ PYEOF
 
 patch_progress_thread() {
     _do_patch "gateway/run.py" \
-        "修复「任务进度跑到频道里」的问题" \
+        "Fix: task progress leaking to channel（修复「任务进度跑到频道里」的问题）" \
         'or source.platform == Platform.MATTERMOST' <<'PYEOF'
 import sys
 file_path = sys.argv[1]
@@ -148,43 +148,46 @@ PYEOF
 check_status() {
     echo ""
     echo "═══════════════════════════════════════════════════"
-    echo "  🔍 正在检查你的 Hermes 是否完整支持 Mattermost..."
+    echo "  🔍 Checking if your Hermes fully supports Mattermost..."
+    echo "     （正在检查你的 Hermes 是否完整支持 Mattermost）"
     echo "═══════════════════════════════════════════════════"
     echo ""
 
     local ok_count=0 total=2
 
-    echo "  ── 检查 ①：审批卡片能不能发到你的私信 ──"
+    echo "  ── Check ①: Can approval cards reach your DMs? ──"
+    echo "     （审批卡片能不能发到你的私信）"
     echo ""
     if grep -q 'user_id=source.user_id' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
-        ok "审批卡片能正常发送 ✅（Hermes 知道该把卡片发给谁）"
+        ok "Approval cards work ✅ (Hermes knows who to DM)（审批卡片能正常发送 — Hermes 知道发给谁）"
         ok_count=$((ok_count + 1))
     else
-        warn "审批卡片可能收不到 ⚠️（Hermes 还不知道该私信谁）"
+        warn "Approval cards may not arrive ⚠️ (Hermes doesn't know who to DM)（审批卡片可能收不到 — Hermes 不知道该私信谁）"
     fi
 
     echo ""
-    echo "  ── 检查 ②：任务进度会显示在 Thread 还是频道里 ──"
+    echo "  ── Check ②: Will task progress show in Threads or the channel? ──"
+    echo "     （任务进度会显示在 Thread 还是频道里）"
     echo ""
     if grep -q 'or source.platform == Platform.MATTERMOST' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
-        ok "进度显示在 Thread 里 ✅（你在 Thread 里聊，进度就出现在 Thread 里）"
+        ok "Progress stays in Threads ✅ (where you chat, progress follows)（进度显示在 Thread 里 — 在哪聊就在哪显示）"
         ok_count=$((ok_count + 1))
     else
-        warn "进度会跑到频道里 ⚠️（你在 Thread 里等结果，过程中却看不到任何反馈）"
+        warn "Progress leaks to channel ⚠️ (you wait in a Thread but see no feedback)（进度会跑到频道里 — Thread 里看不到过程）"
     fi
 
     echo ""
     echo "───────────────────────────────────────────────────"
-    echo "  检查结果：${ok_count}/${total} 项通过"
+    echo "  Result: ${ok_count}/${total} passed（检查结果：${ok_count}/${total} 项通过）"
     echo "───────────────────────────────────────────────────"
     echo ""
 
     if [[ $ok_count -eq $total ]]; then
-        ok "一切正常，所有修复都已生效，不需要再做什么 ✨"
+        ok "All good, every fix is working ✨（一切正常，所有修复都已生效）"
     elif [[ $ok_count -eq 0 ]]; then
-        warn "两项修复都还没装，建议运行：$0 apply"
+        warn "No fixes applied yet, run: $0 apply（两项修复都还没装，建议运行：$0 apply）"
     else
-        warn "还有一项修复没装完，建议运行：$0 apply"
+        warn "One fix still missing, run: $0 apply（还有一项修复没装完，建议运行：$0 apply）"
     fi
 }
 
@@ -192,11 +195,11 @@ check_status() {
 
 restart_gateway() {
     echo ""
-    info "正在重启 Hermes..."
+    info "Restarting Hermes...（正在重启 Hermes）"
     if hermes gateway restart 2>&1; then
-        ok "已重启 ✅ — 修复现在生效了！"
+        ok "Restarted ✅ — fixes are now active!（已重启 — 修复生效了！）"
     else
-        warn "重启失败，请稍后在终端手动执行：hermes gateway restart"
+        warn "Restart failed, manually run: hermes gateway restart（重启失败，请手动执行：hermes gateway restart）"
     fi
     echo ""
 }
@@ -204,17 +207,17 @@ restart_gateway() {
 # ── 应用所有 ──────────────────────────────────────────────────────────────
 
 apply_all() {
-    info "正在修复 Hermes 在 Mattermost 里的两个小问题..."
+    info "Fixing two small issues with Hermes in Mattermost...（正在修复两个小问题...）"
     echo ""
     patch_user_id
     patch_progress_thread
     echo ""
-    ok "修复完成！"
+    ok "Fixes applied!（修复完成！）"
     echo ""
 
     # 交互式重启询问
     echo "───────────────────────────────────────────────────"
-    echo -n "修复需要重启 Hermes 才能生效。是否现在重启？[Y/n] "
+    echo -n "Restart required for fixes to take effect. Restart now? [Y/n]（需要重启才能生效，是否现在重启？） "
     read -r REPLY
     echo ""
 
@@ -223,8 +226,8 @@ apply_all() {
             restart_gateway
             ;;
         *)
-            warn "已跳过。修复已经安装好了，但需要重启后才能生效。"
-            warn "请稍后手动执行：hermes gateway restart"
+            warn "Skipped. Fixes are installed but require a restart.（已跳过 — 修复已安装，重启后生效）"
+            warn "Manually restart later: hermes gateway restart（稍后手动执行：hermes gateway restart）"
             echo ""
             ;;
     esac
@@ -244,10 +247,10 @@ case "$CMD" in
         check_status
         ;;
     *)
-        echo "用法: $0 {apply|check|status}"
+        echo "Usage: $0 {apply|check|status}（用法）"
         echo ""
-        echo "  check   — 检查两个修复是否生效（默认）"
-        echo "  apply   — 安装修复，完成后询问是否立即重启 Gateway"
-        echo "  status  — 同 check"
+        echo "  check   — Check if both fixes are applied (default)（检查两个修复是否生效，默认）"
+        echo "  apply   — Apply fixes, then ask whether to restart（安装修复，完成后询问是否重启）"
+        echo "  status  — Same as check（同 check）"
         ;;
 esac
