@@ -34,8 +34,53 @@ class MattermostApprovalAdapter(MattermostAdapter):
     """Mattermost 适配器 — DM 审批 + /model 卡片 + /new 确认。"""
 
     def __init__(self, config):
+        import os as _os
+
         super().__init__(config)
         self._model_picker_callbacks: Dict[str, Callable] = {}
+
+        # ── Callback server 配置 ──
+        self._callback_server = None
+        self._callback_port: int = int(
+            _os.getenv("MATTERMOST_CALLBACK_PORT", "18065")
+        )
+        self._callback_bind: str = _os.getenv(
+            "MATTERMOST_CALLBACK_BIND", "127.0.0.1"
+        )
+        self._callback_url: str = _os.getenv(
+            "MATTERMOST_CALLBACK_URL", ""
+        )
+        self._callback_secret: str = _os.getenv(
+            "MATTERMOST_CALLBACK_SECRET", ""
+        )
+        # DM channel 缓存: user_id → dm_channel_id
+        self._dm_cache: Dict[str, str] = {}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 公共辅助方法
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _get_allowed_users(self) -> set:
+        """获取 MATTERMOST_ALLOWED_USERS 配置."""
+        import os as _os
+        allowed_str = _os.getenv("MATTERMOST_ALLOWED_USERS", "").strip()
+        if not allowed_str:
+            return set()
+        return {u.strip() for u in allowed_str.split(",") if u.strip()}
+
+    async def _get_or_create_dm(self, user_id: str) -> str:
+        """获取或创建与指定用户的 DM channel（幂等，带缓存）."""
+        if user_id in self._dm_cache:
+            return self._dm_cache[user_id]
+
+        payload = [self._bot_user_id, user_id]
+        data = await self._api_post("channels/direct", payload)
+
+        dm_id = data.get("id", "")
+        if dm_id:
+            self._dm_cache[user_id] = dm_id
+
+        return dm_id
 
     # ══════════════════════════════════════════════════════════════════════
     # 回调服务器（多路由）
@@ -550,6 +595,143 @@ class MattermostApprovalAdapter(MattermostAdapter):
         else:
             return {"ephemeral_text": f"重置失败: {message}"}
 
+    # ── DM 审批发送 ──
+
+    async def send_exec_approval(
+        self,
+        chat_id: str,
+        command: str,
+        session_key: str,
+        description: str = "dangerous command",
+        metadata: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
+    ) -> SendResult:
+        """发送按钮式审批提示到用户 DM.
+
+        Bot API 创建的帖子 integration 字段虽被 API 响应剥离，
+        但数据库中完整保留，MM 服务端处理按钮点击时从 DB 读取，
+        因此 Bot API + DM 方式可正常触发回调。
+        """
+        if not user_id:
+            return SendResult(
+                success=False,
+                error="Cannot send DM approval without user_id",
+            )
+
+        try:
+            # 1. 获取/创建 DM channel
+            dm_channel_id = await self._get_or_create_dm(user_id)
+            if not dm_channel_id:
+                return SendResult(
+                    success=False,
+                    error="Failed to create DM channel",
+                )
+
+            # 2. 构建 callback URL
+            callback_url = self._callback_url or (
+                f"http://{self._callback_bind}:{self._callback_port}"
+                f"/mattermost/callback"
+            )
+
+            cmd_preview = (
+                command[:3800] + "..." if len(command) > 3800 else command
+            )
+
+            # 3. 构建 Interactive Message
+            attachment = {
+                "fallback": f"⚠️ 危险命令需要审批: {command[:100]}",
+                "color": "#ff9900",
+                "text": (
+                    f"```\n{cmd_preview}\n```\n"
+                    f"**Reason:** {description}\n\n"
+                    f"请点击下方按钮审批或拒绝此操作。"
+                ),
+                "actions": [
+                    {
+                        "id": "approveonce",
+                        "name": "Allow Once",
+                        "type": "button",
+                        "style": "primary",
+                        "integration": {
+                            "url": callback_url,
+                            "context": {
+                                "action": "approve_once",
+                                "session_key": session_key,
+                                "command": command,
+                            },
+                        },
+                    },
+                    {
+                        "id": "approvesession",
+                        "name": "Allow Session",
+                        "type": "button",
+                        "integration": {
+                            "url": callback_url,
+                            "context": {
+                                "action": "approve_session",
+                                "session_key": session_key,
+                                "command": command,
+                            },
+                        },
+                    },
+                    {
+                        "id": "approvealways",
+                        "name": "Always Allow",
+                        "type": "button",
+                        "integration": {
+                            "url": callback_url,
+                            "context": {
+                                "action": "approve_always",
+                                "session_key": session_key,
+                                "command": command,
+                            },
+                        },
+                    },
+                    {
+                        "id": "deny",
+                        "name": "Deny",
+                        "type": "button",
+                        "style": "danger",
+                        "integration": {
+                            "url": callback_url,
+                            "context": {
+                                "action": "deny",
+                                "session_key": session_key,
+                            },
+                        },
+                    },
+                ],
+            }
+
+            # 4. 通过 Bot API 发送到 DM（props.attachments）
+            payload = {
+                "channel_id": dm_channel_id,
+                "message": "⚠️ 危险命令需要审批",
+                "props": {"attachments": [attachment]},
+            }
+
+            data = await self._api_post("posts", payload)
+            if not data or "id" not in data:
+                return SendResult(
+                    success=False, error="Failed to send DM approval post"
+                )
+
+            # 5. 在原频道发送简短提示
+            await self.send(
+                chat_id,
+                "⏳ 已向您发送私信，请在 DM 中审批危险命令。",
+            )
+
+            return SendResult(success=True, message_id=data.get("id"))
+
+        except Exception as e:
+            logger.error(
+                "[Mattermost] send_exec_approval failed: %s",
+                e,
+                exc_info=True,
+            )
+            return SendResult(success=False, error=str(e))
+
     # ══════════════════════════════════════════════════════════════════════
     # 核心操作：模型切换 + 会话重置
     # ══════════════════════════════════════════════════════════════════════
@@ -739,6 +921,34 @@ class MattermostApprovalAdapter(MattermostAdapter):
         return SendResult(success=False, error="Use Slash Command /model instead")
 
     # ══════════════════════════════════════════════════════════════════════
+    # 回调服务器辅助方法
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def _stop_callback_server(self) -> None:
+        """停止 callback server."""
+        if self._callback_server:
+            self._callback_server.close()
+            await self._callback_server.wait_closed()
+            self._callback_server = None
+            logger.info("Mattermost callback server stopped")
+
+    def _verify_signature(self, body: bytes, signature: str) -> bool:
+        """HMAC-SHA256 校验 Mattermost 回调签名."""
+        import hmac as _hmac
+        import hashlib as _hashlib
+
+        if not self._callback_secret:
+            return True
+
+        expected = _hmac.new(
+            self._callback_secret.encode("utf-8"),
+            body,
+            _hashlib.sha256,
+        ).hexdigest()
+
+        return _hmac.compare_digest(expected, signature)
+
+    # ══════════════════════════════════════════════════════════════════════
     # 父类方法覆写（修复内置适配器的 Bug）
     # ══════════════════════════════════════════════════════════════════════
 
@@ -753,3 +963,28 @@ class MattermostApprovalAdapter(MattermostAdapter):
         if metadata and metadata.get("thread_id"):
             body["parent_id"] = metadata["thread_id"]
         await self._api_post(f"users/{self._bot_user_id}/typing", body)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 生命周期覆写（启动/停止回调服务器）
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def connect(self) -> bool:
+        """Connect to Mattermost — 覆写父类，追加回调服务器启动."""
+        import asyncio
+
+        # 先调用内置 connect（认证 + WebSocket）
+        result = await super().connect()
+        if not result:
+            return False
+
+        # 启动审批 + Slash 指令回调服务器
+        await self._start_callback_server()
+        return True
+
+    async def disconnect(self) -> None:
+        """Disconnect from Mattermost — 覆写父类，追加回调服务器停止."""
+        # 先停止回调服务器
+        await self._stop_callback_server()
+
+        # 再调用内置 disconnect
+        await super().disconnect()
