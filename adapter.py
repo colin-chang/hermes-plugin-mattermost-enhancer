@@ -1106,10 +1106,19 @@ class MattermostApprovalAdapter(MattermostAdapter):
                         "reply_mode=%s chat_id=%s",
                         reply_to, root_id, self._reply_mode, chat_id,
                     )
+                elif metadata and metadata.get("thread_id"):
+                    # _resolve_root_id 失败时降级使用 metadata.thread_id，
+                    # 避免消息落到频道级（而非正确的 Thread）。
+                    payload["root_id"] = str(metadata["thread_id"])
+                    logger.warning(
+                        "Mattermost: send() — _resolve_root_id returned None for "
+                        "reply_to=%s, falling back to metadata.thread_id=%s",
+                        reply_to, metadata["thread_id"],
+                    )
                 else:
                     logger.warning(
                         "Mattermost: send() — _resolve_root_id returned None for "
-                        "reply_to=%s, sending without thread routing to avoid 400",
+                        "reply_to=%s, no metadata fallback — sending without thread routing",
                         reply_to,
                     )
             elif self._reply_mode == "thread" and metadata and metadata.get("thread_id"):
