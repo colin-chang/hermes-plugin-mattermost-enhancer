@@ -199,18 +199,36 @@ MATTERMOST_CALLBACK_URL=http://host.docker.internal:18065/mattermost/callback
 
 ### 第 4 步：运行配套脚本 + 重启
 
+**什么时候需要运行？**
+- ✅ **首次安装**：必须执行
+- ✅ **Hermes 升级后**：升级可能覆盖源码修复，运行 `check` 确认状态
+- ✅ **功能异常时**：审批卡片收不到、进度消息不进 Thread → 先 `check` 诊断
+- ❌ **正常使用时**：不需要重复运行
+
 ```bash
 cd ~/.hermes/plugins/hermes-plugin-mattermost-enhancer
 
-# 先检查当前状态
+# 先检查当前状态（看看两个修复是否已应用）
 ./scripts/hermes-mattermost-enhancer.sh check
-
-# 应用修复
-./scripts/hermes-mattermost-enhancer.sh apply
-
-# 重启 Hermes Gateway
-hermes gateway restart
 ```
+
+如果 `check` 显示未应用，执行修复：
+
+```bash
+# 应用修复（完成后会自动询问你是否立即重启）
+./scripts/hermes-mattermost-enhancer.sh apply
+```
+
+`apply` 完成后会询问：
+
+```
+是否立即重启 Hermes Gateway 使补丁生效？[Y/n]
+```
+
+- 回车或输入 `Y` → 自动执行 `hermes gateway restart`
+- 输入 `n` → 跳过，稍后自己手动重启
+
+> 💡 如果 `check` 显示 2/2 已应用，就不需要执行 `apply`。
 
 🎉 **完成！** 现在去 Mattermost 里试试 `/model` 或者执行一条危险命令看看审批卡片吧。
 

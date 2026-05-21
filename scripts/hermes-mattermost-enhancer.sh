@@ -21,7 +21,8 @@
 #
 # 使用方法：
 #   ./scripts/hermes-mattermost-enhancer.sh check   # 检查状态
-#   ./scripts/hermes-mattermost-enhancer.sh apply   # 应用补丁
+#   ./scripts/hermes-mattermost-enhancer.sh apply   # 应用补丁（完成后询问是否立即重启）
+#   ./scripts/hermes-mattermost-enhancer.sh status  # 同 check
 #
 # 必要条件：
 #   - Hermes Agent 源码位于 ~/.hermes/hermes-agent/
@@ -182,6 +183,19 @@ check_status() {
     fi
 }
 
+# ── 重启 Gateway ──────────────────────────────────────────────────────────
+
+restart_gateway() {
+    echo ""
+    info "正在重启 Hermes Gateway..."
+    if hermes gateway restart 2>&1; then
+        ok "Hermes Gateway 已重启 ✅"
+    else
+        warn "重启失败，请稍后手动执行 hermes gateway restart"
+    fi
+    echo ""
+}
+
 # ── 应用所有 ──────────────────────────────────────────────────────────────
 
 apply_all() {
@@ -190,12 +204,29 @@ apply_all() {
     patch_user_id
     patch_progress_thread
     echo ""
-    ok "应用完成！重启 Hermes Gateway 生效"
+    ok "补丁应用完成！"
     echo ""
+
+    # 交互式重启询问
+    echo "───────────────────────────────────────────────────"
+    echo -n "是否立即重启 Hermes Gateway 让补丁生效？[Y/n] "
+    read -r REPLY
+    echo ""
+
+    case "${REPLY:-y}" in
+        [Yy]|"")
+            restart_gateway
+            ;;
+        *)
+            warn "请稍后手动执行 hermes gateway restart 让补丁生效"
+            echo ""
+            ;;
+    esac
+
     check_status
 }
 
-# ── 主命令分发 ─────────────────────────────────────────────────────────────
+# ── 主命令分发 ────────────────────────────────────────────────────────────
 
 CMD="${1:-check}"
 
@@ -210,7 +241,7 @@ case "$CMD" in
         echo "用法: $0 {apply|check|status}"
         echo ""
         echo "  check   — 检查 patches 状态（默认）"
-        echo "  apply   — 应用所有 patches"
+        echo "  apply   — 应用 patches，完成后询问是否立即重启"
         echo "  status  — 同 check，显示状态"
         ;;
 esac
