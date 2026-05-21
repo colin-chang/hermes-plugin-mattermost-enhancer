@@ -18,7 +18,7 @@ import logging
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from gateway.platforms.base import SendResult
-from gateway.platforms.mattermost import MattermostAdapter
+from gateway.platforms.mattermost import MattermostAdapter, MAX_POST_LENGTH
 
 from .cards import (
     render_model_selector_card,
@@ -988,3 +988,191 @@ class MattermostApprovalAdapter(MattermostAdapter):
 
         # 再调用内置 disconnect
         await super().disconnect()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Thread root_id 解析（替代 patch 6）
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def _resolve_root_id(self, post_id: str) -> str:
+        """Resolve a post_id to the thread root_id for Mattermost.
+
+        Mattermost requires root_id to be the *root* post of a thread.
+        If the post is a reply (has its own root_id), we must use that
+        root_id instead. Using a reply's own ID as root_id causes
+        "Invalid RootId parameter" errors.
+        """
+        if not post_id:
+            return post_id
+        data = await self._api_get(f"posts/{post_id}")
+        logger.info(
+            "Mattermost: _resolve_root_id — input=%s data.root_id=%r returning=%s",
+            post_id, data.get("root_id") if data else None,
+            data.get("root_id") if data and data.get("root_id") else post_id,
+        )
+        if data and data.get("root_id"):
+            return data["root_id"]
+        return post_id
+
+    async def _get_thread_root_id(self, reply_to: Optional[str]) -> Optional[str]:
+        """Resolve reply_to → thread root_id when in thread mode."""
+        if reply_to and self._reply_mode == "thread":
+            return await self._resolve_root_id(reply_to)
+        return None
+
+    # ══════════════════════════════════════════════════════════════════════
+    # send() 覆写 — 添加 _resolve_root_id（替代 patch 6a）
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def send(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """覆写父类 send()：将 root_id 解析为 thread 根帖子 ID."""
+        if not content:
+            return SendResult(success=True)
+
+        formatted = self.format_message(content)
+        chunks = self.truncate_message(formatted, MAX_POST_LENGTH)
+
+        last_id = None
+        for chunk in chunks:
+            payload: Dict[str, Any] = {
+                "channel_id": chat_id,
+                "message": chunk,
+            }
+            if reply_to and self._reply_mode == "thread":
+                payload["root_id"] = await self._resolve_root_id(reply_to)
+                logger.info(
+                    "Mattermost: send() threading — reply_to=%s resolved_root=%s "
+                    "reply_mode=%s chat_id=%s",
+                    reply_to, payload["root_id"], self._reply_mode, chat_id,
+                )
+            elif reply_to and self._reply_mode != "thread":
+                logger.info(
+                    "Mattermost: send() reply_to present but reply_mode=%s (not 'thread') — "
+                    "skipping root_id — reply_to=%s chat_id=%s",
+                    self._reply_mode, reply_to, chat_id,
+                )
+
+            data = await self._api_post("posts", payload)
+            if not data or "id" not in data:
+                return SendResult(success=False, error="Failed to create post")
+            last_id = data["id"]
+
+        return SendResult(success=True, message_id=last_id)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # _send_local_file() 覆写 — MEDIA 静默跳过 + _resolve_root_id（替代 patch 6c + 10c）
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def _send_local_file(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str],
+        reply_to: Optional[str],
+        file_name: Optional[str] = None,
+    ) -> SendResult:
+        """覆写父类 _send_local_file：文件不存在时静默跳过 + Thread root_id 解析."""
+        import mimetypes
+        from pathlib import Path as _Path
+
+        p = _Path(file_path)
+        if not p.exists():
+            # 替代 patch 10c：静默跳过，不发噪声消息到频道
+            logger.warning(
+                "Mattermost: local file not found, skipping: %s", file_path
+            )
+            return SendResult(success=True, message_id=None)
+
+        fname = file_name or p.name
+        ct = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+        file_data = p.read_bytes()
+
+        file_id = await self._upload_file(chat_id, file_data, fname, ct)
+        if not file_id:
+            return SendResult(success=False, error="File upload failed")
+
+        payload: Dict[str, Any] = {
+            "channel_id": chat_id,
+            "message": caption or "",
+            "file_ids": [file_id],
+        }
+        root_id = await self._get_thread_root_id(reply_to)
+        if root_id:
+            payload["root_id"] = root_id
+
+        data = await self._api_post("posts", payload)
+        if not data or "id" not in data:
+            return SendResult(success=False, error="Failed to post with file")
+        return SendResult(success=True, message_id=data["id"])
+
+    # ══════════════════════════════════════════════════════════════════════
+    # _send_url_as_file() 覆写 — 添加 _resolve_root_id（替代 patch 6b）
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def _send_url_as_file(
+        self,
+        chat_id: str,
+        url: str,
+        caption: Optional[str],
+        reply_to: Optional[str],
+        kind: str = "file",
+    ) -> SendResult:
+        """覆写父类 _send_url_as_file：添加 Thread root_id 解析."""
+        from tools.url_safety import is_safe_url
+        if not is_safe_url(url):
+            logger.warning("Mattermost: blocked unsafe URL (SSRF protection)")
+            return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+
+        import aiohttp
+
+        file_data = None
+        ct = "application/octet-stream"
+        fname = url.rsplit("/", 1)[-1].split("?")[0] or f"{kind}.png"
+
+        for attempt in range(3):
+            try:
+                async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status >= 500 or resp.status == 429:
+                        if attempt < 2:
+                            logger.debug("Mattermost download retry %d/2 for %s (status %d)",
+                                         attempt + 1, url[:80], resp.status)
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                            continue
+                    if resp.status >= 400:
+                        return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+                    file_data = await resp.read()
+                    ct = resp.content_type or "application/octet-stream"
+                    break
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                if attempt < 2:
+                    await asyncio.sleep(1.5 * (attempt + 1))
+                    continue
+                logger.warning("Mattermost: failed to download %s after %d attempts: %s", url, attempt + 1, exc)
+                return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+
+        if file_data is None:
+            logger.warning("Mattermost: download returned no data for %s", url)
+            return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+
+        file_id = await self._upload_file(chat_id, file_data, fname, ct)
+        if not file_id:
+            return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+
+        payload: Dict[str, Any] = {
+            "channel_id": chat_id,
+            "message": caption or "",
+            "file_ids": [file_id],
+        }
+        root_id = await self._get_thread_root_id(reply_to)
+        if root_id:
+            payload["root_id"] = root_id
+
+        data = await self._api_post("posts", payload)
+        if not data or "id" not in data:
+            return SendResult(success=False, error="Failed to post with file")
+        return SendResult(success=True, message_id=data["id"])
