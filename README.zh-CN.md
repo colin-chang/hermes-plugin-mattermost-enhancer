@@ -1,7 +1,9 @@
-# Hermes × Mattermost 增强插件
+# Hermes  Mattermost Enhancer Plugin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Hermes](https://img.shields.io/badge/Hermes-≥%200.14.0-blue)](https://github.com/nousresearch/hermes-agent)
+
+[English Version](./README.md) | 中文版本
 
 让你的 Hermes AI 助手在 Mattermost 里变得更聪明、更安全、更好用。
 
@@ -34,7 +36,7 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 | **Always Allow** | 以后这个命令永远不需要审批 |
 | **Deny** | 拒绝，不执行 |
 
-> 📸 `[截图位]` — 私信中的审批卡片，展示 4 个按钮的界面
+![授权选项卡效果](images/approve.webp)
 
 你点哪个按钮，按钮就会立刻消失并生效。整个过程全在 Mattermost 里完成，不用切窗口。
 
@@ -48,7 +50,7 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 **现在：** 在任何 Thread 里输入 `/model`，会弹出一张下拉菜单卡片：
 
-> 📸 `[截图位]` — `/model` 指令弹出的模型选择下拉卡片
+![模型切换选项卡效果](images/model.webp)
 
 下拉列表里列出了所有你可用的模型。选一个，这个 Thread 就会立刻切换到新模型，**其他 Thread 不受影响**。
 
@@ -64,7 +66,7 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 **现在：** 输入 `/new`，会弹出确认卡片：
 
-> 📸 `[截图位]` — `/new` 指令弹出的确认卡片
+![创建会话选项卡效果](images/new.webp)
 
 点击确认后：
 - ✅ 当前 Thread 的模型切换被清除（恢复默认模型）
@@ -81,7 +83,8 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 **现在：** Typing 提示正确出现在当前 Thread 中，你知道它在处理你的请求 ✅
 
-> 📸 `[截图位]` — Thread 里显示 "Hermes 正在输入..."  的 Typing 指示器
+
+![Typing 指示器示例效果](images/typing.webp)
 
 ---
 
@@ -131,7 +134,7 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 就是修这两个插件够不到的 Bug。它直接修改了 Hermes 的源码文件（`gateway/run.py`），加了两行代码。
 
-> 📸 `[截图位]` — 运行 `./scripts/hermes-mattermost-enhancer.sh check` 的输出结果
+![Patch脚本运行效果](images/patch.webp)
 
 ### 我该装哪个？
 
@@ -158,10 +161,6 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 ```bash
 hermes plugins install colin-chang/hermes-plugin-mattermost-enhancer --enable
 ```
-
-这一条命令做了两件事：① 下载插件到 `~/.hermes/plugins/` ② 自动启用。
-
-> 💡 也可以手动安装：`git clone https://github.com/colin-chang/hermes-plugin-mattermost-enhancer.git ~/.hermes/plugins/mattermost-enhancer`，再在 `config.yaml` 的 `plugins.enabled` 里加上 `mattermost-enhancer`。
 
 ### 第 2 步：注册 Mattermost Slash 指令
 
@@ -219,17 +218,6 @@ cd ~/.hermes/plugins/hermes-plugin-mattermost-enhancer
 ./scripts/hermes-mattermost-enhancer.sh apply
 ```
 
-`apply` 完成后会询问：
-
-```
-是否立即重启 Hermes Gateway 使补丁生效？[Y/n]
-```
-
-- 回车或输入 `Y` → 自动执行 `hermes gateway restart`
-- 输入 `n` → 跳过，稍后自己手动重启
-
-> 💡 如果 `check` 显示 2/2 已应用，就不需要执行 `apply`。
-
 🎉 **完成！** 现在去 Mattermost 里试试 `/model` 或者执行一条危险命令看看审批卡片吧。
 
 ---
@@ -242,13 +230,8 @@ cd ~/.hermes/plugins/hermes-plugin-mattermost-enhancer
 
 1. 在任何 Thread 里输入 `/model` 并发送
 2. 会弹出一张下拉菜单，显示所有可用模型
-
-   > 📸 `[截图位]` — Thread 中的 `/model` 下拉菜单卡片
-
 3. 从下拉菜单中选择你要的模型
 4. 当前 Thread 立刻切换，下一个问题就用新模型回答
-
-   > 📸 `[截图位]` — 选择模型后的确认提示
 
 > 💡 切换只影响当前 Thread。其他 Thread 还是原来的模型。想切回去？再 `/model` 选一次。
 
@@ -256,9 +239,6 @@ cd ~/.hermes/plugins/hermes-plugin-mattermost-enhancer
 
 1. 输入 `/new` 并发送
 2. 弹出确认卡片
-
-   > 📸 `[截图位]` — `/new` 确认卡片
-
 3. 点击确认，一切重置
 
 > 💡 `/new` 不会删除聊天记录，只是让 AI "失忆"。之前的聊天还在 Thread 里可以看。
@@ -270,18 +250,12 @@ cd ~/.hermes/plugins/hermes-plugin-mattermost-enhancer
 当 Hermes 要执行危险命令时：
 
 1. 你会在 **私信** 里收到一张审批卡片
-
-   > 📸 `[截图位]` — 私信中的审批卡片，展示 4 个按钮
-
 2. 选择其中一个按钮：
    - **Allow Once** — 只批准这一次
    - **Allow This Session** — 这次对话有效
    - **Always Allow** — 永远批准这条命令
    - **Deny** — 拒绝
-
 3. 按钮立刻消失，Hermes 收到你的决定并执行
-
-   > 📸 `[截图位]` — 点击 "Allow Once" 后卡片消失的效果
 
 ---
 

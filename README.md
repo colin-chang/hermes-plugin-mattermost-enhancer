@@ -1,174 +1,178 @@
-# Hermes × Mattermost Enhancer Plugin
+# Hermes  Mattermost Enhancer Plugin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Hermes](https://img.shields.io/badge/Hermes-≥%200.14.0-blue)](https://github.com/nousresearch/hermes-agent)
 
-Makes your Hermes AI assistant smarter, safer, and more pleasant to use inside Mattermost.
+English Version | [中文版本](./README.zh-CN.md)
 
-> 📖 [中文文档 (Chinese README)](README.zh-CN.md)
-
----
-
-## What is this?
-
-**One sentence:** If you chat with Hermes in Mattermost, this plugin makes the experience *way* better.
-
-Out of the box, Hermes works in Mattermost — but some things are annoying:
-- Dangerous commands run instantly, no "are you sure?" step
-- Thread replies sometimes leak into the channel
-- Switching AI models means editing config files and restarting
-
-This plugin fixes all of that.
+Makes your Hermes AI assistant smarter, safer, and easier to use inside Mattermost.
 
 ---
 
-## ✨ Features
+## 😵‍💫 What Is This?
 
-> 📸 Screenshots can be placed at each `[screenshot]` marker below.
+**In one sentence:** If you use Hermes in Mattermost, this plugin makes everything work better.
 
-### 🛡️ 1. DM Approval for Dangerous Commands
+Hermes is an AI assistant you chat with in Mattermost to get things done. But the vanilla Hermes has some rough edges — it runs dangerous commands without asking, Thread replies sometimes leak into the channel, switching AI models requires editing config files…
 
-When Hermes is about to run a command that could do real damage (like `rm -rf` or dropping a database table), it won't just execute it. Instead, it sends you a **private DM card** with four buttons:
-
-| Button | What it does |
-|--------|-------------|
-| **Allow Once** | Approve this one time. Next time, ask again. |
-| **Allow This Session** | Approve for the rest of this conversation. |
-| **Always Allow** | Never ask for this command again. |
-| **Deny** | Cancel. Don't run it. |
-
-> 📸 `[screenshot]` — DM approval card with 4 buttons
-
-Click any button, and it takes effect immediately — no window switching required.
+This plugin "retrofits" these capabilities onto Hermes so everything just feels right.
 
 ---
 
-### 🧠 2. Model Switching (`/model`)
+## ✨ What Can It Do?
 
-**Before:** Changing AI models meant editing `config.yaml` and restarting the Gateway.
+### 🛡️ 1. Dangerous Command Approval (DM Card Confirmation)
 
-**Now:** Type `/model` in any Thread. A dropdown card lists all your available models:
+**Scenario:** You ask Hermes to run a command like `rm -rf some-folder` or `DROP TABLE`. Once executed, there's no undo — if the AI misunderstood you, the consequences are real.
 
-> 📸 `[screenshot]` — `/model` dropdown card with model list
+**Before:** Hermes runs it instantly. You only see the result in chat — too late to stop it 😱
 
-Pick one. Only **this Thread** switches models. Other Threads keep theirs.
+**Now:** When Hermes is about to execute a dangerous command, it won't act immediately. It sends you a **private DM confirmation card** with 4 buttons:
 
----
+| Button | Effect |
+|--------|--------|
+| **Allow Once** | Approve this time only; ask again next time |
+| **Allow This Session** | Approve for the rest of this conversation |
+| **Always Allow** | Never require approval for this command again |
+| **Deny** | Refuse — don't run it |
 
-### 🔄 3. Session Reset (`/new`)
+![Approval card effect](images/approve.webp)
 
-**Before:** When the AI got stuck on a topic, you had to start a new Thread.
-
-**Now:** Type `/new` for a confirmation card:
-
-> 📸 `[screenshot]` — `/new` confirmation card
-
-Confirming clears the model override, agent cache, and session state — a fresh start in the same Thread.
-
----
-
-### ⌨️ 4. Thread-aware Typing Indicator
-
-**Before:** The "typing..." indicator appeared at the **channel** level, even when you were waiting in a Thread.
-
-**Now:** The typing indicator correctly shows in the current Thread, so you know Hermes is actually working on your request.
-
-> 📸 `[screenshot]` — Typing indicator inside a Thread
+Click any button and it takes effect immediately — all within Mattermost, no window switching.
 
 ---
 
-## 🐛 Bug Fixes
+### 🧠 2. Switch AI Models (`/model` Command)
 
-These are bugs fixed by this plugin (and its companion script). Each entry shows what went wrong and how it affected you.
+**Scenario:** You have multiple AI models available — some excel at coding, some at conversation, some are cheaper, some faster. You want to pick the right model for each task.
 
-| # | Bug | Real-World Impact | Fixed |
-|---|-----|-------------------|-------|
-| **1** | Thread replies leak to channel level | CRT mode: you can't find AI replies where you expect them | Replies correctly stay in the Thread |
-| **2** | Missing-file errors spam the chat | `File not found: /tmp/img.png` fills your conversation | Silently skipped — no noise |
-| **3** | Typing indicator at channel, not Thread | You wait in a Thread but see no "typing..." feedback | Typing indicator follows Thread context |
-| **4** | DM approval had no user_id | Approval cards couldn't be delivered to you | user_id properly passed, cards arrive |
-| **5** | Tool-chain progress leaks to channel | Multi-step tasks show progress ("Searching...", "Reading file...") only in the main channel, not your Thread | You wait in a Thread with zero visibility into what's happening — result just pops out at the end 💀 | Progress messages appear in the correct Thread, you see every step |
+**Before:** You had to edit `~/.hermes/config.yaml` and restart the Gateway — tedious 💀
+
+**Now:** Type `/model` in any Thread and a dropdown card appears:
+
+![Model switching card effect](images/model.webp)
+
+The dropdown lists all your available models. Pick one — this Thread immediately switches to the new model, **other Threads are unaffected**.
+
+Thread A uses Model X for coding; Thread B uses Model Y for chatting. No interference.
 
 ---
 
-## Plugin vs. Companion Script — How It Works
+### 🔄 3. Reset Conversation (`/new` Command)
 
-### Hermes Architecture (Simplified)
+**Scenario:** The conversation has gone off track and the AI keeps fixating on an earlier topic. You want a fresh start.
 
-Think of Hermes as a **robot** 🤖:
+**Before:** No way out — either start a new Thread or endure the AI's "memory" 💀
+
+**Now:** Type `/new` and a confirmation card appears:
+
+![New session card effect](images/new.webp)
+
+After confirming:
+- ✅ The Thread's model override is cleared (back to default)
+- ✅ Hermes' "memory" is wiped (like a brand-new conversation)
+- ✅ Session state is reset
+
+---
+
+### ⌨️ 4. Typing Indicator
+
+**Scenario:** You're waiting for Hermes to reply in a Thread and want to know it's thinking.
+
+**Before:** The "typing..." indicator appeared at the **channel** level, not in the Thread you're watching. You thought it was stuck 😕
+
+**Now:** The typing indicator correctly appears in your current Thread — you know it's processing your request ✅
+
+![Typing indicator example](images/typing.webp)
+
+---
+
+---
+
+## 🐛 What Bugs Are Fixed?
+
+Below are 5 bugs fixed by this project (plugin + companion script). Each includes the **real-world impact** so you can tell if you've encountered them.
+
+| # | Bug Description | Real-World Impact | After Fix |
+|---|----------------|-------------------|------------|
+| **1** | Thread replies leak: Hermes replies in a Thread may appear in the main channel instead of the Thread | CRT mode — chat chaos, you can't find the AI's reply | Replies correctly stay in the current Thread |
+| **2** | Missing file spam: Hermes posts long error messages when an image/file can't be found | Chat flooded with `File not found: /tmp/xxx.png`, disrupting conversation | Silently skipped — no noise |
+| **3** | Typing indicator at wrong level: the "typing..." indicator appears at the channel while Hermes is thinking in a Thread | You wait in a Thread with no typing feedback | Typing correctly appears in the current Thread |
+| **4** | DM approval missing user_id: Hermes can't determine which user to send the approval DM to | Approval cards never arrive; dangerous commands may execute without approval | user_id properly passed; cards delivered on time |
+| **5** | Tool progress not routed to Thread: multi-step task progress ("Searching...", "Reading file...") only appears in the main channel | You wait in a Thread with zero visibility into progress — result just pops out at the end 💀 | Progress messages correctly appear in the current Thread; you see every step in real time |
+
+---
+
+---
+
+## 🧱 Plugin vs. Companion Script — How to Understand It?
+
+You may have noticed this project contains both a **plugin** and a **companion shell script** (`scripts/hermes-mattermost-enhancer.sh`). Here's a plain-language explanation.
+
+### How Hermes Works
+
+Think of Hermes as an **intelligent robot** 👤:
 
 ```
-You → Mattermost → Hermes Gateway (the robot's brain) → AI model
-                          │
-                          ├── Plugin: adds new skills to the robot
-                          └── Source code: the robot's wiring — plugins can't touch this
+You ──→ Mattermost ──→ Hermes Gateway (robot hub) ──→ AI Brain
+                              │
+                              ├── Plugin: adds new skills to the robot
+                              └── Source code: the robot's "skeleton" — can't change
 ```
 
 ### What the Plugin Can (and Can't) Do
 
-- ✅ **Plugin territory:** How Hermes replies to you (adapter methods). All features above are plugin-based.
-- ❌ **Outside plugin reach:** How Hermes gets *called* in the first place (caller-side code). This is deep in `gateway/run.py`.
+A plugin is like installing an app on your phone — it adds features and improves the experience, but can't modify the phone's operating system.
 
-Bug #4 (DM user_id) and Bug #5 (tool progress routing) are in the caller-side code — the plugin simply can't reach them.
+- ✅ **What the plugin can change:** How the robot "replies to you" (adapter methods) — all features listed above are plugin-based
+- ❌ **What the plugin can't touch:** How the robot "gets woken up" (caller-side code) — this is deep in Hermes' source code
+
+Bug **#4** (DM approval missing user_id) and Bug **#5** (tool progress not routed to Thread) are exactly in that untouchable caller-side code.
 
 ### What the Companion Script Does
 
-It applies two tiny fixes to `~/.hermes/hermes-agent/gateway/run.py`:
+It fixes those two plugin-unreachable bugs. It directly modifies Hermes' source file (`gateway/run.py`) by adding two lines of code.
 
-1. Passes `user_id` when sending approval cards (so the plugin knows who to DM)
-2. Routes tool-progress messages into Mattermost Threads (not just the channel)
+![Patch script output](images/patch.webp)
 
-> 📸 `[screenshot]` — `./scripts/hermes-mattermost-enhancer.sh check` output
+### Which One Do I Need?
 
-### Which Do I Need?
+**Both.** Install the plugin first (for the features), then run the script (for the two low-level bug fixes).
 
-**Both.** Install the plugin first, then run the script once.
-
-> 💡 If Hermes merges these fixes upstream someday, the script becomes unnecessary — running `check` will just show "already applied."
+> 💡 In the future, Hermes upstream may merge these two fixes in, making the script unnecessary. Running `check` will then show "already applied" and you can ignore it.
 
 ---
 
-## 🚀 Quick Start (5 Steps)
+---
+
+## 🚀 Quick Start (4 Steps)
 
 ### Prerequisites
 
-- [Hermes Agent](https://github.com/nousresearch/hermes-agent) ≥ 0.14.0
-- Mattermost server with a Bot account (`post:all` permission)
-- Python ≥ 3.11
+- ✅ Running [Hermes Agent](https://github.com/nousresearch/hermes-agent) (≥ 0.14.0)
+- ✅ Mattermost server with Bot account configured
+- ✅ Python 3.11+
 
 ---
 
 ### Step 1: Install the Plugin
 
 ```bash
-git clone https://github.com/colin-chang/hermes-plugin-mattermost-enhancer.git \
-  ~/.hermes/plugins/mattermost-enhancer
+hermes plugins install colin-chang/hermes-plugin-mattermost-enhancer --enable
 ```
 
-### Step 2: Enable It
+### Step 2: Register Mattermost Slash Commands
 
-Add to `~/.hermes/config.yaml`:
-
-```yaml
-plugins:
-  enabled:
-    - mattermost-enhancer     # ← add this line
-```
-
-> ⚠️ Note: the plugin name is `mattermost-enhancer`, not `hermes-plugin-mattermost-enhancer`
-
-### Step 3: Register Slash Commands in Mattermost
-
-In **System Console → Integrations → Slash Commands**, add two:
+In **Mattermost System Console → Integrations → Slash Commands**, add two:
 
 | Command | Request URL | Purpose |
 |---------|-------------|---------|
 | `/model` | `http://<your-hermes-host>:18065/mm-command` | Switch AI model |
 | `/new` | `http://<your-hermes-host>:18065/mm-command` | Reset session |
 
-> 🔧 If Mattermost runs in Docker on the same machine: use `http://host.docker.internal:18065/mm-command`
+> 🔧 If Mattermost and Hermes are on the same machine (Docker deployment), use `http://host.docker.internal:18065/mm-command`
 
-### Step 4: Set Environment Variables
+### Step 3: Configure Environment Variables
 
 Open `~/.hermes/.env` and add:
 
@@ -178,102 +182,105 @@ Open `~/.hermes/.env` and add:
 MATTERMOST_CALLBACK_BIND=0.0.0.0
 MATTERMOST_CALLBACK_PORT=18065
 
-# Callback URL — Mattermost uses this to send button clicks / dropdown selections
-# back to your Hermes instance
-# 🔧 Docker setup (Mattermost in a container): MUST use host.docker.internal
+# Callback URL — Mattermost uses this to send button clicks / dropdown selections back to Hermes
+# 🔧 Docker deployment (Mattermost in container): MUST use host.docker.internal
 MATTERMOST_CALLBACK_URL=http://host.docker.internal:18065/mattermost/callback
-# 💻 Local setup (Mattermost + Hermes on same machine, no Docker):
+# 💻 Local deployment (Mattermost + Hermes on same machine, no Docker):
 #    Can leave blank — plugin auto-falls-back to http://127.0.0.1:18065/mattermost/callback
 
 # ═══ Optional ═══
-# HMAC signature verification (skip verification if left empty)
+# HMAC signature verification (skips verification if left empty)
 # MATTERMOST_CALLBACK_SECRET=your-secret
 ```
 
-> ⚠️ If Mattermost runs in Docker (most self-hosted setups), **`MATTERMOST_CALLBACK_URL` is required**. Without it, the Docker container can't reach Hermes on the host machine.
+> ⚠️ If you're like most self-hosting users with Mattermost running in Docker, **`MATTERMOST_CALLBACK_URL` must be set**. Without it, the Docker container can't reach Hermes on the host machine.
 
-### Step 5: Run Companion Script + Restart
+### Step 4: Run Companion Script + Restart
+
+**When do you need to run this?**
+- ✅ **First install**: required
+- ✅ **After Hermes upgrade**: upgrades may overwrite source fixes — run `check` to confirm status
+- ✅ **When features act up**: approval cards not arriving, progress messages not in Thread → run `check` to diagnose
+- ❌ **During normal use**: no need to re-run
 
 ```bash
-cd ~/.hermes/plugins/mattermost-enhancer
+cd ~/.hermes/plugins/hermes-plugin-mattermost-enhancer
 
-# Check status first
+# First, check current status (see if both fixes are applied)
 ./scripts/hermes-mattermost-enhancer.sh check
-
-# Apply fixes
-./scripts/hermes-mattermost-enhancer.sh apply
-
-# Restart Hermes
-hermes gateway restart
 ```
 
-🎉 **Done!** Try `/model` in a Thread or run a dangerous command to test DM approval.
+If `check` shows fixes not applied, run:
+
+```bash
+# Apply fixes (will automatically ask if you want to restart immediately after)
+./scripts/hermes-mattermost-enhancer.sh apply
+```
+
+🎉 **Done!** Now go to Mattermost and try `/model` or run a dangerous command to see the approval card.
 
 ---
 
-## 📖 Usage
+---
 
-### Switching Models
+## 📖 Usage Guide
 
-1. Type `/model` in any Thread
-2. A dropdown card appears with your available models
+### Switching AI Models
 
-   > 📸 `[screenshot]` — model selector dropdown in a Thread
+1. Type `/model` in any Thread and send
+2. A dropdown card appears listing all available models
+3. Select the model you want from the dropdown
+4. The current Thread switches immediately — your next question uses the new model
 
-3. Select a model from the dropdown
-4. The Thread immediately switches — your next question uses the new model
+> 💡 Switching only affects the current Thread. Other Threads keep their original model. Want to switch back? Just `/model` again.
 
-   > 📸 `[screenshot]` — confirmation after model switch
+### Resetting a Conversation
 
-> 💡 Only this Thread is affected. Other Threads keep their original model.
-
-### Resetting a Session
-
-1. Type `/new`
+1. Type `/new` and send
 2. A confirmation card appears
+3. Click confirm — everything resets
 
-   > 📸 `[screenshot]` — reset confirmation card
-
-3. Confirm to clear model override, agent cache, and session state
+> 💡 `/new` doesn't delete chat history — it just makes the AI "forget". Previous messages remain in the Thread for viewing.
 
 ### Approving Dangerous Commands
 
-This is automatic — no action needed from you.
+This is automatic — no manual trigger needed.
 
-When Hermes wants to run a dangerous command:
+When Hermes is about to run a dangerous command:
 
-1. A DM card arrives in your private messages
+1. You receive an approval card in your **private DM**
+2. Choose one of the buttons:
+   - **Allow Once** — approve this one time
+   - **Allow This Session** — valid for this conversation
+   - **Always Allow** — permanently approve this command
+   - **Deny** — refuse
+3. The button disappears instantly; Hermes receives your decision and acts on it
 
-   > 📸 `[screenshot]` — approval card in DM
-
-2. Choose one of the four buttons
-3. The card disappears, and Hermes follows your decision
-
-   > 📸 `[screenshot]` — card disappears after clicking "Allow Once"
+---
 
 ---
 
 ## ❓ FAQ
 
-**Q: Do I need both the plugin and the script?**
+**Q: Do I need to install both the plugin and the script?**
 
-A: Yes. The plugin is the feature pack. The script fixes two bugs the plugin can't reach. Install both.
+A: Yes. The plugin is the "feature pack"; the script is the "bug-fix pack". You need both. The script only needs to run once (`apply`), though you may need to re-run after upgrading Hermes.
 
-**Q: What happens when I upgrade Hermes?**
+**Q: What should I do after upgrading Hermes?**
 
-A: Upgrading may overwrite the two script fixes. Run `./scripts/hermes-mattermost-enhancer.sh check` after upgrading to see if you need to re-apply.
+A: Major Hermes upgrades may overwrite the source fixes. It's recommended to run `./scripts/hermes-mattermost-enhancer.sh check` again to verify status.
 
-**Q: Will the script break anything?**
+**Q: Will the script mess up my Hermes?**
 
-A: No. It changes exactly two lines. Run `check` anytime to see the current status. Re-installing Hermes reverts everything.
+A: No. It only changes two lines of code. You can check status anytime with `check`. To revert, simply reinstall Hermes.
 
 **Q: What if I skip the script?**
 
-A: Two things won't work properly:
-- DM approval cards may not reach you (no user_id)
-- Tool progress messages appear at channel level instead of your Thread
+A: Two bugs remain unfixed:
+- DM approval cards won't arrive (no user_id)
+- Tool progress messages won't appear in Threads (they'll appear in the main channel)
 
-Everything else works fine.
+All other features still work normally.
 
 ---
 
@@ -282,16 +289,16 @@ Everything else works fine.
 ```
 mattermost-enhancer/
 ├── plugin.yaml              # Plugin metadata
-├── __init__.py              # Entry point
+├── __init__.py              # Plugin entry point
 ├── adapter.py               # Core logic (31 methods)
 ├── cards.py                 # Interactive card templates
 ├── models.py                # Model list resolver
-├── callback_server.py       # HTTP callback server
+├── callback_server.py       # Callback server
 ├── scripts/
 │   └── hermes-mattermost-enhancer.sh   # Companion shell script
 ├── references/
-│   └── api-contracts.md     # Mattermost API specs
-├── README.md                # This file
+│   └── api-contracts.md     # Mattermost API contract docs
+├── README.md                # This document
 ├── README.zh-CN.md          # Chinese documentation
 └── LICENSE                  # MIT
 ```

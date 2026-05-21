@@ -83,6 +83,26 @@ class MattermostApprovalAdapter(MattermostAdapter):
 
         return dm_id
 
+    async def _get_user_id_from_channel(self, channel_id: str) -> Optional[str]:
+        """从 channel members 中提取非 bot 的 user_id。
+
+        替代 patch 8：当 run.py 未传 user_id 时，通过 channel members API
+        反查 DM channel 中的对方用户 ID。额外一次 GET 请求，仅在审批触发时调用。
+        """
+        try:
+            data = await self._api_get(f"channels/{channel_id}/members")
+            if isinstance(data, list):
+                for member in data:
+                    uid = member.get("user_id", "")
+                    if uid and uid != self._bot_user_id:
+                        return uid
+        except Exception:
+            logger.warning(
+                "Mattermost: _get_user_id_from_channel failed for %s",
+                channel_id, exc_info=True,
+            )
+        return None
+
     # ══════════════════════════════════════════════════════════════════════
     # 回调服务器（多路由）
     # ══════════════════════════════════════════════════════════════════════
@@ -613,6 +633,9 @@ class MattermostApprovalAdapter(MattermostAdapter):
         因此 Bot API + DM 方式可正常触发回调。
         """
         if not user_id:
+            # 替代 patch 8：从 chat_id 反查 DM channel members 推导 user_id
+            user_id = await self._get_user_id_from_channel(chat_id)
+        if not user_id:
             return SendResult(
                 success=False,
                 error="Cannot send DM approval without user_id",
@@ -995,24 +1018,53 @@ class MattermostApprovalAdapter(MattermostAdapter):
     # Thread root_id 解析（替代 patch 6）
     # ══════════════════════════════════════════════════════════════════════
 
-    async def _resolve_root_id(self, post_id: str) -> str:
+    async def _resolve_root_id(self, post_id: str) -> Optional[str]:
         """Resolve a post_id to the thread root_id for Mattermost.
 
         Mattermost requires root_id to be the *root* post of a thread.
         If the post is a reply (has its own root_id), we must use that
         root_id instead. Using a reply's own ID as root_id causes
         "Invalid RootId parameter" errors.
+
+        Returns None when resolution fails (API error, network issue) —
+        callers MUST skip root_id in that case to avoid 400 errors.
         """
         if not post_id:
-            return post_id
-        data = await self._api_get(f"posts/{post_id}")
+            return None
+        try:
+            data = await self._api_get(f"posts/{post_id}")
+        except Exception:
+            logger.warning(
+                "Mattermost: _resolve_root_id — API call failed for post=%s, "
+                "skipping thread routing",
+                post_id, exc_info=True,
+            )
+            return None
+
+        if data is None:
+            logger.warning(
+                "Mattermost: _resolve_root_id — API returned None for post=%s, "
+                "skipping thread routing",
+                post_id,
+            )
+            return None
+
+        root_id = data.get("root_id")
+        # root_id can be "" (empty string = this post IS the root).
+        # Only use data["root_id"] when it's a non-empty string pointing
+        # to a different post.
+        if isinstance(root_id, str) and root_id:
+            logger.info(
+                "Mattermost: _resolve_root_id — input=%s root_id=%s (reply → use root)",
+                post_id, root_id,
+            )
+            return root_id
+
+        # root_id is "" or missing → this post IS the thread root.
         logger.info(
-            "Mattermost: _resolve_root_id — input=%s data.root_id=%r returning=%s",
-            post_id, data.get("root_id") if data else None,
-            data.get("root_id") if data and data.get("root_id") else post_id,
+            "Mattermost: _resolve_root_id — input=%s is_root=True (root_id=%r)",
+            post_id, root_id,
         )
-        if data and data.get("root_id"):
-            return data["root_id"]
         return post_id
 
     async def _get_thread_root_id(self, reply_to: Optional[str]) -> Optional[str]:
@@ -1046,11 +1098,30 @@ class MattermostApprovalAdapter(MattermostAdapter):
                 "message": chunk,
             }
             if reply_to and self._reply_mode == "thread":
-                payload["root_id"] = await self._resolve_root_id(reply_to)
+                root_id = await self._resolve_root_id(reply_to)
+                if root_id:
+                    payload["root_id"] = root_id
+                    logger.info(
+                        "Mattermost: send() threading — reply_to=%s resolved_root=%s "
+                        "reply_mode=%s chat_id=%s",
+                        reply_to, root_id, self._reply_mode, chat_id,
+                    )
+                else:
+                    logger.warning(
+                        "Mattermost: send() — _resolve_root_id returned None for "
+                        "reply_to=%s, sending without thread routing to avoid 400",
+                        reply_to,
+                    )
+            elif self._reply_mode == "thread" and metadata and metadata.get("thread_id"):
+                # 替代 patch 8b：reply_to 未提供时降级使用 metadata.thread_id。
+                # 工具进度消息等场景下 _progress_reply_to 为 None，但
+                # _progress_metadata 中已携带 thread_id（= source.thread_id），
+                # 在 Mattermost 中即为 root post ID，无需额外解析。
+                payload["root_id"] = str(metadata["thread_id"])
                 logger.info(
-                    "Mattermost: send() threading — reply_to=%s resolved_root=%s "
-                    "reply_mode=%s chat_id=%s",
-                    reply_to, payload["root_id"], self._reply_mode, chat_id,
+                    "Mattermost: send() threading from metadata fallback — "
+                    "thread_id=%s chat_id=%s",
+                    payload["root_id"], chat_id,
                 )
             elif reply_to and self._reply_mode != "thread":
                 logger.info(
