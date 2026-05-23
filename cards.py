@@ -242,3 +242,120 @@ def render_reset_success_card() -> Dict[str, Any]:
         "response_type": "in_channel",
         "attachments": [attachment],
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Clarify 交互卡片
+# ═══════════════════════════════════════════════════════════════════════════
+
+def render_clarify_card(
+    *,
+    question: str,
+    choices: Optional[List[str]],
+    clarify_id: str,
+    session_key: str,
+    callback_url: str,
+    channel_id: str,
+    user_id: str,
+) -> Dict[str, Any]:
+    """渲染 Clarify 交互卡片（多选按钮 + 自由文本）。
+
+    - 有 choices: 每个选项渲染为一个按钮，外加一个「✍️ 其他（自由输入）」按钮
+    - 无 choices (open-ended): 渲染提示文本，用户下一条消息即为回答
+    """
+    attachments = []
+
+    if choices and len(choices) > 0:
+        # ── 多选按钮模式 ──
+        # Mattermost action id 限制：只能字母数字，不能用下划线/连字符
+        actions = []
+        for i, choice in enumerate(choices):
+            safe_id = f"clarify{clarify_id}{i:02d}"
+            btn = _make_button(
+                action_id=safe_id,
+                name=f"{i + 1}. {choice}",
+                context={
+                    "action": "cmd_clarify_choice",
+                    "clarify_id": clarify_id,
+                    "choice_value": choice,
+                    "channel_id": channel_id,
+                    "user_id": user_id,
+                },
+                callback_url=callback_url,
+            )
+            actions.append(btn)
+
+        # 「其他」按钮 — 切换到自由文本模式
+        actions.append(
+            _make_button(
+                action_id=f"clarify{clarify_id}ot",
+                name="✍️ 其他（自由输入）",
+                context={
+                    "action": "cmd_clarify_other",
+                    "clarify_id": clarify_id,
+                    "channel_id": channel_id,
+                    "user_id": user_id,
+                },
+                callback_url=callback_url,
+            )
+        )
+
+        # 按 5 个一组拆分
+        action_groups = [
+            actions[i:i + _MAX_ACTIONS_PER_ATTACHMENT]
+            for i in range(0, len(actions), _MAX_ACTIONS_PER_ATTACHMENT)
+        ]
+
+        for idx, group in enumerate(action_groups):
+            pretext = f"❓ {question}" if idx == 0 else ""
+            attachments.append(
+                _make_attachment(
+                    pretext=pretext,
+                    text="请选择一个选项，或点击「其他」自由输入：",
+                    actions=group,
+                    color="#FF9800",
+                    footer="💡 点击按钮即可回复",
+                )
+            )
+    else:
+        # ── 开放式问题 ──
+        attachments.append(
+            _make_attachment(
+                pretext=f"❓ {question}",
+                text="请直接回复你的答案。",
+                actions=[],
+                color="#FF9800",
+                footer="💡 直接输入文字回复即可",
+            )
+        )
+
+    return {
+        "response_type": "in_channel",
+        "attachments": attachments,
+    }
+
+
+def render_clarify_choice_confirmed_card(choice: str) -> Dict[str, Any]:
+    """Clarify 选项被选择后的确认卡片。"""
+    attachment = _make_attachment(
+        pretext="",
+        text=f"✅ 已选择: **{choice}**",
+        actions=[],
+        color="#4CAF50",
+    )
+    return {
+        "attachments": [attachment],
+    }
+
+
+def render_clarify_other_prompt_card() -> Dict[str, Any]:
+    """Clarify「其他」按钮被点击后的提示卡片。"""
+    attachment = _make_attachment(
+        pretext="",
+        text="📝 请在下方输入你的回答：",
+        actions=[],
+        color="#FF9800",
+    )
+    return {
+        "attachments": [attachment],
+    }

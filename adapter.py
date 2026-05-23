@@ -26,6 +26,9 @@ from .cards import (
     render_new_session_confirm_card,
     render_switch_success_card,
     render_reset_success_card,
+    render_clarify_card,
+    render_clarify_choice_confirmed_card,
+    render_clarify_other_prompt_card,
 )
 
 logger = logging.getLogger(__name__)
@@ -454,9 +457,17 @@ class MattermostApprovalAdapter(MattermostAdapter):
     # ══════════════════════════════════════════════════════════════════════
 
     async def _handle_callback(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """处理按钮回调 — 审批 + 模型切换 + 会话重置。"""
+        """处理按钮回调 — 审批 + 模型切换 + 会话重置 + Clarify。"""
         context = payload.get("context", {})
         action = context.get("action", "")
+
+        # ── Clarify 选择 ──
+        if action == "cmd_clarify_choice":
+            return await self._handle_clarify_choice_callback(payload)
+
+        # ── Clarify「其他」─→
+        if action == "cmd_clarify_other":
+            return await self._handle_clarify_other_callback(payload)
 
         # ── 模型切换 ──
         if action == "cmd_model_switch":
@@ -528,6 +539,81 @@ class MattermostApprovalAdapter(MattermostAdapter):
                         "actions": [],  # 清空按钮，防止 Deny 后重复点击
                     }],
                 },
+            },
+        }
+
+    # ── Clarify 回调处理 ──
+
+    async def _handle_clarify_choice_callback(
+        self, payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """处理 Clarify 选项按钮回调。
+
+        用户点击某个选项 → resolve_gateway_clarify → 更新卡片为确认状态。
+        """
+        from tools.clarify_gateway import resolve_gateway_clarify
+
+        context = payload.get("context", {})
+        clarify_id = context.get("clarify_id", "")
+        choice_value = context.get("choice_value", "")
+
+        if not clarify_id:
+            logger.warning("Clarify choice callback: missing clarify_id")
+            return {"ephemeral_text": "⚠️ Invalid clarify callback"}
+
+        resolved = resolve_gateway_clarify(clarify_id, choice_value)
+        if not resolved:
+            logger.warning(
+                "Clarify choice callback: resolve failed (already resolved?) clarify_id=%s",
+                clarify_id,
+            )
+            return {"update": {"message": "⚠️ 此问题已过期", "props": {}}}
+
+        logger.info(
+            "Clarify choice callback: resolved clarify_id=%s choice=%r",
+            clarify_id, choice_value,
+        )
+
+        # 更新原始卡片为确认状态
+        card = render_clarify_choice_confirmed_card(choice_value)
+        return {
+            "update": {
+                "message": "",
+                "props": card,
+            },
+        }
+
+    async def _handle_clarify_other_callback(
+        self, payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """处理 Clarify「其他」按钮回调。
+
+        标记 clarify 进入文本捕获模式 → 用户下一条消息被 Gateway 拦截为回答。
+        """
+        from tools.clarify_gateway import mark_awaiting_text
+
+        context = payload.get("context", {})
+        clarify_id = context.get("clarify_id", "")
+
+        if not clarify_id:
+            logger.warning("Clarify other callback: missing clarify_id")
+            return {"ephemeral_text": "⚠️ Invalid clarify callback"}
+
+        ok = mark_awaiting_text(clarify_id)
+        if not ok:
+            logger.warning(
+                "Clarify other callback: mark_awaiting_text failed clarify_id=%s",
+                clarify_id,
+            )
+
+        logger.info("Clarify other callback: awaiting text clarify_id=%s", clarify_id)
+
+        # 更新原始卡片为「请输入」提示
+        card = render_clarify_other_prompt_card()
+        return {
+            "update": {
+                "message": "",
+                "props": card,
             },
         }
 
@@ -1146,6 +1232,76 @@ class MattermostApprovalAdapter(MattermostAdapter):
             last_id = data["id"]
 
         return SendResult(success=True, message_id=last_id)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # send_clarify() 覆写 — 渲染交互卡片替代纯文本（替代 base.send_clarify）
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[list],
+        clarify_id: str,
+        session_key: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """覆写 base.send_clarify()：用 MM interactive card 渲染选项按钮。
+
+        - 有 choices → 每个选项渲染为一个按钮 + 「其他」按钮
+        - 无 choices → 纯文本提问，Gateway text-intercept 自动捕获回复
+        """
+        callback_url = self._callback_url or (
+            f"http://{self._callback_bind}:{self._callback_port}/mattermost/callback"
+        )
+        logger.info(
+            "Mattermost: send_clarify — callback_url=%r _callback_url=%r card_choices=%d",
+            callback_url, self._callback_url,
+            len(choices) if choices else 0,
+        )
+
+        # 从 metadata 中提取 channel_id（兼容不同调用方）
+        channel_id_for_card = chat_id
+
+        card = render_clarify_card(
+            question=question,
+            choices=list(choices) if choices else None,
+            clarify_id=clarify_id,
+            session_key=session_key,
+            callback_url=callback_url,
+            channel_id=channel_id_for_card,
+            user_id="",  # user_id 不需要在 clarify 卡片中
+        )
+
+        # 通过 Bot API 发送交互卡片到 thread
+        root_id = None
+        if metadata and metadata.get("thread_id"):
+            root_id = await self._get_thread_root_id(metadata["thread_id"])
+
+        post_id = await self._post_card_in_thread(chat_id, root_id, card)
+
+        if post_id:
+            # 保存 post_id → clarify_id 映射，供回调时更新卡片
+            if not hasattr(self, "_clarify_posts"):
+                self._clarify_posts: Dict[str, str] = {}
+            self._clarify_posts[clarify_id] = post_id
+
+            logger.info(
+                "Mattermost: send_clarify — question=%r clarify_id=%s post_id=%s",
+                question[:60], clarify_id, post_id,
+            )
+            return SendResult(success=True, message_id=post_id)
+
+        # 降级：Bot API 失败时回退到纯文本
+        logger.warning("Mattermost: send_clarify card post failed, falling back to text")
+        return await super().send_clarify(
+            chat_id=chat_id,
+            question=question,
+            choices=choices,
+            clarify_id=clarify_id,
+            session_key=session_key,
+            metadata=metadata,
+        )
 
     # ══════════════════════════════════════════════════════════════════════
     # _send_local_file() 覆写 — MEDIA 静默跳过 + _resolve_root_id（替代 patch 6c + 10c）

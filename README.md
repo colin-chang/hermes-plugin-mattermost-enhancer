@@ -87,11 +87,29 @@ After confirming:
 
 ---
 
+### ❓ 5. AI Asks You Questions (Interactive Cards)
+
+**Scenario:** Hermes hits a decision point during a complex task — "This file has two processing approaches: A is fast but rough, B is slow but precise. Which one?" Or an open-ended question like "What approach would you prefer?"
+
+**Before:** Hermes drops a plain-text line "Please reply: 1. A 2. B" into the Thread, easily missed in the conversation flow. You don't see it → Hermes hangs waiting 💀
+
+**Now:** When Hermes asks a question, it posts a **prominent interactive card** with clickable buttons for each option. A "✍️ Other" button lets you type a free-form answer:
+
+![AI question interactive card](images/clarify.webp)
+
+- Click an option button → takes effect immediately, card updates to confirmed ✅
+- Click "✍️ Other" → card prompts "Type your answer below" — just type in the chat
+- Open-ended questions (no choices) → shows the question text, just type your answer
+
+Everything happens inside Mattermost — no window switching, no commands to memorize.
+
+---
+
 ---
 
 ## 🐛 What Bugs Are Fixed?
 
-Below are 5 bugs fixed by this project (plugin + companion script). Each includes the **real-world impact** so you can tell if you've encountered them.
+Below are 7 bugs fixed by this project (plugin + companion script). Each includes the **real-world impact** so you can tell if you've encountered them.
 
 | # | Bug Description | Real-World Impact | After Fix |
 |---|----------------|-------------------|------------|
@@ -100,6 +118,8 @@ Below are 5 bugs fixed by this project (plugin + companion script). Each include
 | **3** | Typing indicator at wrong level: the "typing..." indicator appears at the channel while Hermes is thinking in a Thread | You wait in a Thread with no typing feedback | Typing correctly appears in the current Thread |
 | **4** | DM approval missing user_id: Hermes can't determine which user to send the approval DM to | Approval cards never arrive; dangerous commands may execute without approval | user_id properly passed; cards delivered on time |
 | **5** | Tool progress not routed to Thread: multi-step task progress ("Searching...", "Reading file...") only appears in the main channel | You wait in a Thread with zero visibility into progress — result just pops out at the end 💀 | Progress messages correctly appear in the current Thread; you see every step in real time |
+| **6** | AI questions too subtle: Hermes asks a question (multiple choice or open-ended) as plain text, easily missed in the conversation flow | You miss the question → no response → AI times out → also triggers a session split, AI answers nonsense 💀 | Questions rendered as interactive cards with buttons — prominent and clickable |
+| **7** | Session split (AI amnesia): When AI is waiting for your reply, your next message starts a new conversation — AI forgets everything | You're chatting fine in Thread A, then suddenly AI doesn't recognize you and gives random answers | Messages correctly delivered to the waiting AI; no new session created |
 
 ---
 
@@ -127,19 +147,19 @@ A plugin is like installing an app on your phone — it adds features and improv
 - ✅ **What the plugin can change:** How the robot "replies to you" (adapter methods) — all features listed above are plugin-based
 - ❌ **What the plugin can't touch:** How the robot "gets woken up" (caller-side code) — this is deep in Hermes' source code
 
-Bug **#4** (DM approval missing user_id) and Bug **#5** (tool progress not routed to Thread) are exactly in that untouchable caller-side code.
+Bug **#4** (DM approval missing user_id), Bug **#5** (tool progress not routed to Thread), and Bug **#7** (session split) are exactly in that untouchable caller-side code.
 
 ### What the Companion Script Does
 
-It fixes those two plugin-unreachable bugs. It directly modifies Hermes' source file (`gateway/run.py`) by adding two lines of code.
+It fixes those three plugin-unreachable bugs by modifying Hermes' source files with minimal changes. Bug #7 (session split) has also been [submitted upstream](https://github.com/NousResearch/hermes-agent/pull/30669) — future Hermes releases may include the fix built-in.
 
 ![Patch script output](images/patch.webp)
 
 ### Which One Do I Need?
 
-**Both.** Install the plugin first (for the features), then run the script (for the two low-level bug fixes).
+**Both.** Install the plugin first (for the features), then run the script (for the three low-level bug fixes).
 
-> 💡 In the future, Hermes upstream may merge these two fixes in, making the script unnecessary. Running `check` will then show "already applied" and you can ignore it.
+> 💡 In the future, Hermes upstream may merge these fixes in, making the script unnecessary. Running `check` will then show "already applied" and you can ignore it.
 
 ---
 
@@ -256,6 +276,15 @@ When Hermes is about to run a dangerous command:
    - **Deny** — refuse
 3. The button disappears instantly; Hermes receives your decision and acts on it
 
+### AI Asking You Questions
+
+This is also automatic. When Hermes needs you to make a decision:
+
+1. A prominent interactive card appears in the current Thread
+2. Click the option button you want → takes effect immediately
+3. Or click "✍️ Other" → type your answer directly in the chat box
+4. For open-ended questions → no buttons shown, just type your answer
+
 ---
 
 ---
@@ -272,13 +301,14 @@ A: Major Hermes upgrades may overwrite the source fixes. It's recommended to run
 
 **Q: Will the script mess up my Hermes?**
 
-A: No. It only changes two lines of code. You can check status anytime with `check`. To revert, simply reinstall Hermes.
+A: No. It makes minimal changes. You can check status anytime with `check`. To revert, simply reinstall Hermes.
 
 **Q: What if I skip the script?**
 
-A: Two bugs remain unfixed:
+A: Three bugs remain unfixed:
 - DM approval cards won't arrive (no user_id)
 - Tool progress messages won't appear in Threads (they'll appear in the main channel)
+- Session split: when AI is waiting for your reply, your next message may start a new conversation (AI forgets everything)
 
 All other features still work normally.
 

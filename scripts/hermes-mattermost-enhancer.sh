@@ -4,10 +4,11 @@
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # 此脚本为 hermes-plugin-mattermost-enhancer 插件的配套补丁。
-# 修复 Hermes Agent 上游代码中 Mattermost 适配器的两个调用方问题。
+# 修复 Hermes Agent 上游代码中影响 Mattermost 用户体验的 Gateway 缺陷——
+# 插件架构（Platform Plugin override）只能覆盖适配器方法，无法触及调用方代码。
 #
 # 为什么需要此脚本：
-#   这两个问题修改的是 gateway/run.py 中的调用方代码，
+#   这些问题修改的是 gateway/run.py 中的调用方代码，
 #   Hermes Platform Plugin 机制只能覆盖适配器方法，无法触及调用方。
 #   详见插件 README。
 #
@@ -18,6 +19,17 @@
 # 问题 2 — 工具进度消息不进 Thread：
 #   run.py 的 _progress_reply_to 条件判断只检查了 Platform.FEISHU，
 #   遗漏了 Platform.MATTERMOST，导致工具链进度回退到频道主会话流。
+#
+# 问题 3 — Clarify 等待时 Session 分裂（AI 失忆）：
+#   _handle_message 用 _quick_key 查 pending clarify，但 _quick_key
+#   可能因 thread_sessions_per_user 配置差异不等于 clarify 注册时的
+#   session_key → 查不到 → 消息穿透 → 新 Session 创建 → 并行双会话。
+#   仅在线程上下文中触发（source.thread_id 守卫）。
+#
+# 问题 4 — Clarify 并发守护（兜底防御）：
+#   _handle_message_with_agent 在获得 canonical session_key 后、
+#   启动 agent 前，再次检查 clarify。当 P46（问题 3）因竞态漏网时，
+#   在最后一刻拦截消息并路由给等待中的 clarify，阻止新 Session 创建。
 #
 # 使用方法：
 #   ./scripts/hermes-mattermost-enhancer.sh check   # 检查状态
@@ -143,6 +155,94 @@ else:
 PYEOF
 }
 
+# ── Patch 3: Clarify Session 分裂修复 ─────────────────────────────────────
+
+patch_clarify_session() {
+    _do_patch "gateway/run.py" \
+        "Fix: clarify session split causing AI amnesia（修复「Clarify 等待时新消息打断导致 AI 失忆」的问题）" \
+        '_canonical_entry = self.session_store.get_or_create_session' <<'PYEOF'
+import sys
+file_path = sys.argv[1]
+with open(file_path, 'r') as f:
+    content = f.read()
+
+old = '''            _pending_clarify = _clarify_mod.get_pending_for_session(_quick_key)
+        except Exception:
+            _pending_clarify = None'''
+
+new = '''            _pending_clarify = _clarify_mod.get_pending_for_session(_quick_key)
+            # When _quick_key doesn't match (thread_sessions_per_user config
+            # mismatch), fall back to the canonical session key.  Only in
+            # Thread contexts — non-Thread paths always have _quick_key ==
+            # canonical key, and calling get_or_create_session there breaks
+            # Telegram topic mode lobby.
+            if _pending_clarify is None and source.thread_id:
+                try:
+                    _canonical_entry = self.session_store.get_or_create_session(source)
+                    _canonical_key = _canonical_entry.session_key
+                    if _canonical_key != _quick_key:
+                        _pending_clarify = _clarify_mod.get_pending_for_session(_canonical_key)
+                except Exception:
+                    pass
+        except Exception:
+            _pending_clarify = None'''
+
+if old in content:
+    content = content.replace(old, new)
+    with open(file_path, 'w') as f:
+        f.write(content)
+    print("APPLIED")
+else:
+    print("SKIP")
+PYEOF
+}
+
+# ── Patch 4: Clarify 并发守护 ─────────────────────────────────────────────
+
+patch_clarify_guard() {
+    _do_patch "gateway/run.py" \
+        "Fix: clarify concurrency guard against duplicate sessions（修复「Clarify 阻塞时并发创建重复会话」的问题）" \
+        'Gateway intercepted clarify at session guard' <<'PYEOF'
+import sys
+file_path = sys.argv[1]
+with open(file_path, 'r') as f:
+    content = f.read()
+
+old = "        session_key = session_entry.session_key\n        self._cache_session_source(session_key, source)"
+
+new = "        session_key = session_entry.session_key\n"
+new += "        # Belt-and-suspenders clarify check using the canonical session\n"
+new += "        # key.  When _quick_key != session_key and no agent is found in\n"
+new += "        # _running_agents under _quick_key, intercept the message before\n"
+new += "        # a new Session spawns.\n"
+new += "        if session_key != _quick_key:\n"
+new += "            try:\n"
+new += '                from tools import clarify_gateway as _clarify_mod2\n'
+new += "                _pc = _clarify_mod2.get_pending_for_session(session_key)\n"
+new += "                if _pc is not None:\n"
+new += '                    _raw = (event.text or "").strip()\n'
+new += '                    if _raw and not _raw.startswith("/"):\n'
+new += "                        _clarify_mod2.resolve_gateway_clarify(_pc.clarify_id, _raw)\n"
+new += "                        logger.info(\n"
+new += '                            "Gateway intercepted clarify at session guard "\n'
+new += '                            "(session=%s, clarify_id=%s)",\n'
+new += "                            session_key, _pc.clarify_id,\n"
+new += "                        )\n"
+new += "                        return None  # consumed by clarify — no new turn\n"
+new += "            except Exception:\n"
+new += "                pass\n"
+new += "        self._cache_session_source(session_key, source)"
+
+if old in content:
+    content = content.replace(old, new, 1)
+    with open(file_path, 'w') as f:
+        f.write(content)
+    print("APPLIED")
+else:
+    print("SKIP")
+PYEOF
+}
+
 # ── 状态检查 ──────────────────────────────────────────────────────────────
 
 check_status() {
@@ -153,7 +253,7 @@ check_status() {
     echo "═══════════════════════════════════════════════════"
     echo ""
 
-    local ok_count=0 total=2
+    local ok_count=0 total=4
 
     echo "  ── Check ①: Can approval cards reach your DMs? ──"
     echo "     （审批卡片能不能发到你的私信）"
@@ -177,6 +277,28 @@ check_status() {
     fi
 
     echo ""
+    echo "  ── Check ③: Will the AI forget what you were talking about? ──"
+    echo "     （AI 会不会突然忘记刚才在聊什么——Clarify 等待时失忆）"
+    echo ""
+    if grep -q '_canonical_entry = self.session_store.get_or_create_session' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
+        ok "No more AI amnesia ✅ (clarify replies stay in the same session)（不会失忆了 — Clarify 回复保持在同一会话中）"
+        ok_count=$((ok_count + 1))
+    else
+        warn "AI may forget context ⚠️ (new session created while waiting for clarify reply)（AI 可能失忆 — 等待 Clarify 回复时可能创建新会话）"
+    fi
+
+    echo ""
+    echo "  ── Check ④: Is there a failsafe against duplicate sessions? ──"
+    echo "     （有没有兜底防护防止并发创建重复会话）"
+    echo ""
+    if grep -q 'Gateway intercepted clarify at session guard' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
+        ok "Failsafe active ✅ (last-moment guard prevents duplicate sessions)（兜底防护已激活 — 最后一刻拦截重复会话）"
+        ok_count=$((ok_count + 1))
+    else
+        warn "No failsafe ⚠️ (rare race condition could still split sessions)（缺少兜底防护 — 极端情况下仍可能分裂会话）"
+    fi
+
+    echo ""
     echo "───────────────────────────────────────────────────"
     echo "  Result: ${ok_count}/${total} passed（检查结果：${ok_count}/${total} 项通过）"
     echo "───────────────────────────────────────────────────"
@@ -185,9 +307,9 @@ check_status() {
     if [[ $ok_count -eq $total ]]; then
         ok "All good, every fix is working ✨（一切正常，所有修复都已生效）"
     elif [[ $ok_count -eq 0 ]]; then
-        warn "No fixes applied yet, run: $0 apply（两项修复都还没装，建议运行：$0 apply）"
+        warn "No fixes applied yet, run: $0 apply（还没有安装任何修复，建议运行：$0 apply）"
     else
-        warn "One fix still missing, run: $0 apply（还有一项修复没装完，建议运行：$0 apply）"
+        warn "Some fixes still missing (${ok_count}/${total}), run: $0 apply（还有修复没装完 ${ok_count}/${total}，建议运行：$0 apply）"
     fi
 }
 
@@ -207,10 +329,12 @@ restart_gateway() {
 # ── 应用所有 ──────────────────────────────────────────────────────────────
 
 apply_all() {
-    info "Fixing two small issues with Hermes in Mattermost...（正在修复两个小问题...）"
+    info "Fixing issues with Hermes in Mattermost...（正在修复 Mattermost 相关问题...）"
     echo ""
     patch_user_id
     patch_progress_thread
+    patch_clarify_session
+    patch_clarify_guard
     echo ""
     ok "Fixes applied!（修复完成！）"
     echo ""
@@ -249,8 +373,8 @@ case "$CMD" in
     *)
         echo "Usage: $0 {apply|check|status}（用法）"
         echo ""
-        echo "  check   — Check if both fixes are applied (default)（检查两个修复是否生效，默认）"
-        echo "  apply   — Apply fixes, then ask whether to restart（安装修复，完成后询问是否重启）"
+        echo "  check   — Check if all fixes are applied (default)（检查所有修复是否生效，默认）"
+        echo "  apply   — Apply fixes, then ask whether to restart（安装所有修复，完成后询问是否重启）"
         echo "  status  — Same as check（同 check）"
         ;;
 esac
