@@ -107,11 +107,12 @@ def render_model_selector_card(
             short_prov = prov_name.split("/")[-1] if "/" in prov_name else prov_name
 
             for model_id in model_ids:
-                # 显示格式：provider/model-name（如 zenmux/minimax-m2.7）
-                display = model_id  # 保持完整的 provider/model 格式
+                # 显示格式：provider/model（如 zenmux/google/gemini-3.1-flash-lite）
+                # 忽略 model_id 自带的前缀，统一用 provider group 名作为前缀
+                display_name = model_id.split("/", 1)[-1] if "/" in model_id else model_id
                 is_current = (model_id == current_model)
                 prefix = "★ " if is_current else ""
-                text = f"{prefix}{display}"
+                text = f"{prefix}{short_prov}/{display_name}"
                 options.append({
                     "text": text,
                     "value": model_id,
