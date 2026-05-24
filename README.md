@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Hermes](https://img.shields.io/badge/Hermes-≥%200.14.0-blue)](https://github.com/nousresearch/hermes-agent)
+[![Release](https://img.shields.io/github/v/release/colin-chang/hermes-plugin-mattermost-enhancer?label=release)](https://github.com/colin-chang/hermes-plugin-mattermost-enhancer/releases)
 
 English Version | [中文版本](./README.zh-CN.md)
 
