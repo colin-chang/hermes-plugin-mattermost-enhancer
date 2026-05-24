@@ -1,0 +1,82 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号 (例如 v2.2.0)'
+        required: true
+        type: string
+      notes:
+        description: 'Release Notes (可选，留空则自动生成)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate version format
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "❌ 版本号格式错误：$VERSION"
+            echo "正确格式：v2.2.0"
+            exit 1
+          fi
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "❌ Tag $VERSION 已存在"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Update plugin.yaml version
+        run: |
+          sed -i "s/^version: .*/version: ${VERSION#v}/" plugin.yaml
+          echo "✅ plugin.yaml version → ${VERSION#v}"
+
+      - name: Commit version bump & tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add plugin.yaml
+          git commit -m "release: $VERSION" || echo "No changes to commit"
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin main --follow-tags
+
+      - name: Generate Release Notes
+        id: notes
+        run: |
+          PREV_TAG=$(git tag --sort=-v:refname | grep -v "$VERSION" | head -1)
+          if [ -n "$PREV_TAG" ]; then
+            echo "## Changes since $PREV_TAG" > /tmp/release_notes.md
+            echo '```' >> /tmp/release_notes.md
+            git log "$PREV_TAG..HEAD" --oneline --no-merges >> /tmp/release_notes.md
+            echo '```' >> /tmp/release_notes.md
+          else
+            echo "## Initial Release" > /tmp/release_notes.md
+            echo '```' >> /tmp/release_notes.md
+            git log --oneline --no-merges >> /tmp/release_notes.md
+            echo '```' >> /tmp/release_notes.md
+          fi
+          cat /tmp/release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: ${{ env.VERSION }}
+          body_path: /tmp/release_notes.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
