@@ -114,6 +114,35 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 ---
 
+### 🏷️ 6. 显示当前模型（回复脚注）
+
+**场景：** 你同时开了好几个 Thread，每个 Thread 可能用不同的 AI 模型。聊着聊着就忘了「这个 Thread 用的是哪个模型？」
+
+**原来：** 没有这个功能。你得输入 `/model` 看一下下拉菜单才知道当前模型 💀
+
+**现在：** 每条 Hermes 回复的末尾会自动加上一行脚注，告诉你当前模型和上下文占用了多少：
+
+![模型脚注效果](images/footer.webp)
+
+灰色等宽小字，不抢眼，瞟一眼就知道当前状态。**这在多 Thread 同时聊天时特别有用**——每个人 Thread 的脚注显示各自的模型，不会搞混。
+
+> 💡 **如何开启**
+>
+> 这个功能基于 Hermes 内置的 `runtime_footer`。在 `~/.hermes/config.yaml` 的 `display` 段中添加：
+>
+> ```yaml
+> display:
+>   runtime_footer:
+>     enabled: true
+>     fields:
+>       - model
+>       - context_pct
+> ```
+>
+> 然后重启 Gateway 即可。`fields` 里只保留了 `model`（模型名）和 `context_pct`（上下文占用百分比）两项，简洁不啰嗦。
+>
+> 如果你用的是 Hermes CLI（非 Gateway），也可以通过 `/footer on` 指令开关。
+
 ---
 
 ## 🐛 修复了什么 Bug？
@@ -293,6 +322,14 @@ cd ~/.hermes/plugins/hermes-plugin-mattermost-enhancer
 2. 点击你想要的选项按钮 → 立刻生效
 3. 或者点击「✍️ 其他」→ 直接在聊天框打字回复
 4. 如果是开放式问题 → 看不到按钮，直接打字回答问题
+
+### 查看当前模型
+
+这也是自动的——不需要你手动触发。
+
+开启后，每条 Hermes 回复末尾都会自动显示当前模型和上下文使用率，格式为 `── deepseek-v4-pro 34% ──`。灰色小字脚注，不干扰阅读。
+
+想关掉？在 `config.yaml` 里把 `display.runtime_footer.enabled` 改成 `false` 再重启就行。
 
 ---
 

@@ -105,6 +105,37 @@ Everything happens inside Mattermost — no window switching, no commands to mem
 
 ---
 
+### 🏷️ 6. Reply Footer (Model & Context)
+
+**Scenario:** You have multiple Threads open, each potentially using a different AI model. Mid-conversation you think: "Wait, which model is this Thread using?"
+
+**Before:** No such feature. You had to type `/model` and check the dropdown to know 💀
+
+**Now:** Every Hermes reply automatically includes a one-line footnote showing the current model and context usage:
+
+![Model footer effect](images/footer.webp)
+
+Gray monospace footnote — subtle, glanceable. **Especially useful with multiple Threads** — each Thread's footer shows its own model, no confusion.
+
+> 💡 **How to Enable**
+>
+> This feature builds on Hermes' built-in `runtime_footer`. Add this to the `display` section of `~/.hermes/config.yaml`:
+>
+> ```yaml
+> display:
+>   runtime_footer:
+>     enabled: true
+>     fields:
+>       - model
+>       - context_pct
+> ```
+>
+> Then restart the Gateway. Only `model` (model name) and `context_pct` (context usage %) are included — clean and concise.
+>
+> If you're using Hermes CLI (not Gateway), you can also toggle it with `/footer on`.
+
+---
+
 ---
 
 ## 🐛 What Bugs Are Fixed?
@@ -284,6 +315,14 @@ This is also automatic. When Hermes needs you to make a decision:
 2. Click the option button you want → takes effect immediately
 3. Or click "✍️ Other" → type your answer directly in the chat box
 4. For open-ended questions → no buttons shown, just type your answer
+
+### Viewing the Current Model
+
+This is also automatic — no manual trigger needed.
+
+Once enabled, every Hermes reply ends with a footer showing the current model and context usage, formatted as `── deepseek-v4-pro 34% ──`. A gray monospace footnote that doesn't disrupt reading.
+
+Want to turn it off? Set `display.runtime_footer.enabled` to `false` in `config.yaml` and restart.
 
 ---
 
