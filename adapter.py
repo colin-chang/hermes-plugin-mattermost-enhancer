@@ -501,46 +501,79 @@ class MattermostApprovalAdapter(MattermostAdapter):
         if not choice:
             return {"ephemeral_text": f"Unknown action: {action}"}
 
-        count = resolve_gateway_approval(session_key, choice)
-        if count == 0:
-            # 审批已被处理（重复点击）— 仍然返回 update 清空卡片按钮
-            # 防止用户继续点击看到 "No pending approval found" 错误
+        # ── 并发点击防护：每个审批按 session_key 串行化 ──
+        # asyncio 回调服务器可以并发处理多个请求。用户快速双击时，
+        # 两个请求同时进入此方法，需用 Lock 串行化避免竞态。
+        # 并发请求直接返回"处理中"更新并清空按钮，防止用户继续点击。
+        import asyncio as _asyncio
+
+        if not hasattr(self, "_approval_locks"):
+            self._approval_locks: Dict[str, _asyncio.Lock] = {}
+
+        lock = self._approval_locks.get(session_key)
+        if not lock:
+            lock = _asyncio.Lock()
+            self._approval_locks[session_key] = lock
+
+        if lock.locked():
+            # 并发请求 — 另一个回调正在处理同一审批，快速返回
+            logger.info(
+                "Approval callback: concurrent click detected for session %s, "
+                "returning processing update",
+                session_key[:40],
+            )
             return {
                 "update": {
-                    "message": "⚠️ 此审批已处理",
+                    "message": "⏳ 正在处理您的审批请求，请稍候...",
                     "props": {
                         "attachments": [{
-                            "actions": [],  # 清空按钮
+                            "actions": [],  # 清空按钮，防止继续点击
                         }],
                     },
                 },
             }
 
-        label_map = {
-            "once": "✅ Approved — Allow Once",
-            "session": "✅ Approved — Allow Session",
-            "always": "✅ Approved — Always Allow",
-            "deny": "❌ Denied",
-        }
-        cmd = context.get("command", "")
-        cmd_display = f"\n```\n{cmd}\n```" if cmd else ""
-        _update_msg = f"{label_map.get(choice, choice)}{cmd_display}"
+        async with lock:
+            count = resolve_gateway_approval(session_key, choice)
+            if count == 0:
+                # 审批已被处理（重复点击）— 仍然返回 update 清空卡片按钮
+                # 防止用户继续点击看到 "No pending approval found" 错误
+                return {
+                    "update": {
+                        "message": "⚠️ 此审批已处理",
+                        "props": {
+                            "attachments": [{
+                                "actions": [],  # 清空按钮
+                            }],
+                        },
+                    },
+                }
 
-        logger.info("Approval callback: %s → %s (session %s), %d resolved",
-                     action, choice, session_key[:40], count)
+            label_map = {
+                "once": "✅ Approved — Allow Once",
+                "session": "✅ Approved — Allow Session",
+                "always": "✅ Approved — Always Allow",
+                "deny": "❌ Denied",
+            }
+            cmd = context.get("command", "")
+            cmd_display = f"\n```\n{cmd}\n```" if cmd else ""
+            _update_msg = f"{label_map.get(choice, choice)}{cmd_display}"
 
-        # update 响应替换卡片内容，同时清空 actions 防止重复点击
-        # MM 的 update 只替换 message+props，按钮仍在 — 必须在 props 中返回空 actions
-        return {
-            "update": {
-                "message": _update_msg,
-                "props": {
-                    "attachments": [{
-                        "actions": [],  # 清空按钮，防止 Deny 后重复点击
-                    }],
+            logger.info("Approval callback: %s → %s (session %s), %d resolved",
+                         action, choice, session_key[:40], count)
+
+            # update 响应替换卡片内容，同时清空 actions 防止重复点击
+            # MM 的 update 只替换 message+props，按钮仍在 — 必须在 props 中返回空 actions
+            return {
+                "update": {
+                    "message": _update_msg,
+                    "props": {
+                        "attachments": [{
+                            "actions": [],  # 清空按钮，防止 Deny 后重复点击
+                        }],
+                    },
                 },
-            },
-        }
+            }
 
     # ── Clarify 回调处理 ──
 

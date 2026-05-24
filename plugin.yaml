@@ -1,10 +1,11 @@
 name: mattermost-enhancer
-version: 2.0.0
-description: "Hermes Mattermost 增强插件 — DM 审批 / 模型切换 / 会话重置 / Thread root_id / MEDIA 静默跳过 / send_typing Thread 路由。覆盖内置 MattermostAdapter。"
+version: 2.1.0
+description: "Hermes Mattermost 增强插件 — DM 审批 / 模型切换 / 会话重置 / Thread root_id / MEDIA 静默跳过 / send_typing Thread 路由 / Channel→Thread 模型继承。覆盖内置 MattermostAdapter。"
 author: Colin Chang
 license: MIT
 kind: platform
 min_hermes_version: "0.14.0"
 platforms:
   - mattermost
-hooks: []
+hooks:
+  - pre_gateway_dispatch  # Channel → Thread 模型继承

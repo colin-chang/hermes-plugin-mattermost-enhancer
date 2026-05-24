@@ -56,6 +56,14 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 比如 Thread A 用模型 X 写代码，Thread B 用模型 Y 聊天，互不干扰。
 
+> 💡 **小贴士：Channel → Thread 模型继承**
+>
+> 如果你在**频道主时间线**里先用 `/model` 选好模型，再点回复按钮创建 Thread，新的 Thread 会**自动继承**你选的模型，不需要再切一次。
+>
+> 举个栗子 🌰：你在 `#开发` 频道里输入 `/model` 选了 `deepseek-v4-pro`，然后回复任意消息（创建 Thread）。这个新 Thread 会自动用 `deepseek-v4-pro`。
+>
+> **但不影响已创建的 Thread**——如果某个 Thread 已经在用别的模型，继承不会覆盖它。每个 Thread 也能随时独立 `/model` 切回别的模型。
+
 ---
 
 ### 🔄 3. 重置对话（`/new` 指令）
