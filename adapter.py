@@ -59,6 +59,9 @@ class MattermostApprovalAdapter(MattermostAdapter):
         )
         # DM channel 缓存: user_id → dm_channel_id
         self._dm_cache: Dict[str, str] = {}
+        # Footer 追踪: chat_id → (post_id, content)
+        # runtime footer 不独立发帖，而是编辑上一条消息追加到末尾
+        self._tracked_posts: Dict[str, Tuple[str, str]] = {}
 
     # ══════════════════════════════════════════════════════════════════════
     # 公共辅助方法
@@ -71,6 +74,15 @@ class MattermostApprovalAdapter(MattermostAdapter):
         if not allowed_str:
             return set()
         return {u.strip() for u in allowed_str.split(",") if u.strip()}
+
+    @staticmethod
+    def _is_footer_line(content: str) -> bool:
+        """检测 runtime footer 行 — 单行、含 · 分隔符、纯文本."""
+        if "\n" in content or len(content) > 120:
+            return False
+        if " · " not in content:
+            return False
+        return True
 
     async def _get_or_create_dm(self, user_id: str) -> str:
         """获取或创建与指定用户的 DM channel（幂等，带缓存）."""
@@ -1208,6 +1220,38 @@ class MattermostApprovalAdapter(MattermostAdapter):
         if not content:
             return SendResult(success=True)
 
+        # ── Footer 拦截：编辑上一条消息而非独立发帖 ──
+        if self._is_footer_line(content):
+            tracked = self._tracked_posts.get(chat_id)
+            if tracked:
+                post_id, _prev_content = tracked
+                # 实时拉取当前帖子内容（流式模式下 send() 收到的 content 不完整）
+                current = await self._api_get(f"posts/{post_id}")
+                current_text = current.get("message", "") if isinstance(current, dict) else ""
+                if not current_text:
+                    logger.warning(
+                        "Mattermost: footer edit skipped — failed to fetch post=%s content",
+                        post_id,
+                    )
+                    # 降级：回退为正常发送
+                else:
+                    footer_text = content.replace(" · ", " ")
+                    footer_md = f"`── {footer_text} ──`"
+                    edited = f"{current_text}\n\n{footer_md}"
+                    result = await self._api_put(f"posts/{post_id}", {
+                        "id": post_id,
+                        "message": edited,
+                    })
+                    if result and result.get("id"):
+                        self._tracked_posts[chat_id] = (post_id, edited)
+                        return SendResult(success=True, message_id=post_id)
+                    logger.warning(
+                        "Mattermost: footer edit failed for post=%s, "
+                        "fallback to normal send",
+                        post_id,
+                    )
+            # 无追踪帖子或编辑/拉取失败 → 正常发送（降级）
+
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, MAX_POST_LENGTH)
 
@@ -1263,6 +1307,10 @@ class MattermostApprovalAdapter(MattermostAdapter):
             if not data or "id" not in data:
                 return SendResult(success=False, error="Failed to create post")
             last_id = data["id"]
+
+        # 追踪非 footer 帖子（用于后续 footer 编辑合并到上一条消息）
+        if last_id and not self._is_footer_line(content):
+            self._tracked_posts[chat_id] = (last_id, content)
 
         return SendResult(success=True, message_id=last_id)
 
