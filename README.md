@@ -141,7 +141,7 @@ Gray monospace footnote — subtle, glanceable. **Especially useful with multipl
 
 ## 🐛 What Bugs Are Fixed?
 
-Below are 9 bugs fixed by this project (plugin + companion script). Each includes the **real-world impact** so you can tell if you've encountered them.
+Below are 10 bugs fixed by this project (plugin + companion script). Each includes the **real-world impact** so you can tell if you've encountered them.
 
 | # | Bug Description | Real-World Impact | After Fix | Implementation |
 |---|----------------|-------------------|-----------|---------------|
@@ -154,6 +154,7 @@ Below are 9 bugs fixed by this project (plugin + companion script). Each include
 | **7** | Session split (AI amnesia): When AI is waiting for your reply, your next message starts a new conversation — AI forgets everything | You're chatting fine in Thread A, then suddenly AI doesn't recognize you and gives random answers | Messages correctly delivered to the waiting AI; no new session created | Shell Patch |
 | **8** | WebSocket frequent disconnects: Mattermost WebSocket disconnects every ~50s (close 258) | Brief message loss, duplicate messages, reply lag | Heartbeat optimized to 15s, connection stable | Adapter Override |
 | **9** | Response fragmentation: AI replies split into multiple separate messages (commentary and body sent separately) | One reply arrives as 3-5 messages, poor reading experience | Commentary merged into stream, one message does the job | Shell Patch |
+| **10** | Media not routed to Thread: generated images/audio/video/documents appear in the main channel instead of the current Thread | You ask for an image in a Thread → image pops up in the channel, breaking the conversation flow 💀 | All media (images, audio, video, documents) correctly appear in the current Thread | Adapter Override |
 
 > 💡 An upstream bug (ghost empty code fences in long code blocks) is also fixed via Shell Patch, but it's uncommon so it's not listed as a separate row.
 
@@ -180,7 +181,7 @@ You ──→ Mattermost ──→ Hermes Gateway (robot hub) ──→ AI Brain
 
 A plugin is like installing an app on your phone — it adds features and improves the experience, but can't modify the phone's operating system.
 
-- ✅ **What the plugin can change:** How the robot "replies to you" (adapter methods) — Bugs #2, #3, #6, #8 are all implemented via adapter overrides and take effect automatically when the plugin is installed
+- ✅ **What the plugin can change:** How the robot "replies to you" (adapter methods) — Bugs #2, #3, #6, #8, #10 are all implemented via adapter overrides and take effect automatically when the plugin is installed
 - ❌ **What the plugin can't touch:** How the robot "gets woken up" (caller-side code) — this is deep in Hermes' source code
 
 Bugs marked **Shell Patch** in the table above (#1, #4, #5, #7, #9) are exactly in that untouchable caller-side code.
@@ -190,6 +191,7 @@ Bugs marked **Shell Patch** in the table above (#1, #4, #5, #7, #9) are exactly 
 It fixes those plugin-unreachable bugs by modifying Hermes' source files with minimal changes. Fixes already submitted upstream:
 - Bug #5 (tool progress not in Thread) + Bug #9 (fallback missing reply_to) → [PR #33335](https://github.com/NousResearch/hermes-agent/pull/33335)
 - Bug #7 (session split) → [PR #30669](https://github.com/NousResearch/hermes-agent/pull/30669)
+- Bug #10 (media not routed to Thread) → [PR #33391](https://github.com/NousResearch/hermes-agent/pull/33391)
 
 Future Hermes releases may include these fixes built-in.
 
@@ -353,12 +355,14 @@ A: No. It makes minimal changes. You can check status anytime with `check`. To r
 
 **Q: What if I skip the script?**
 
-A: Three bugs remain unfixed:
+A: Five bugs remain unfixed (those marked "Shell Patch" above: #1, #4, #5, #7, #9):
+- Thread replies leak into the channel
 - DM approval cards won't arrive (no user_id)
 - Tool progress messages won't appear in Threads (they'll appear in the main channel)
 - Session split: when AI is waiting for your reply, your next message may start a new conversation (AI forgets everything)
+- Response fragmentation: AI replies split into multiple separate messages
 
-All other features still work normally.
+All other features (Adapter Override bugs #2, #3, #6, #8, #10) work normally.
 
 ---
 
@@ -368,7 +372,7 @@ All other features still work normally.
 mattermost-enhancer/
 ├── plugin.yaml              # Plugin metadata
 ├── __init__.py              # Plugin entry point
-├── adapter.py               # Core logic (31 methods)
+├── adapter.py               # Core logic (40+ methods)
 ├── cards.py                 # Interactive card templates
 ├── models.py                # Model list resolver
 ├── callback_server.py       # Callback server

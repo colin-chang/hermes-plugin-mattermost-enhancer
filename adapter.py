@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from gateway.platforms.base import SendResult
@@ -80,23 +81,21 @@ class MattermostApprovalAdapter(MattermostAdapter):
     MAX_MESSAGE_LENGTH = MAX_POST_LENGTH  # 4000
 
     def __init__(self, config):
-        import os as _os
-
         super().__init__(config)
         self._model_picker_callbacks: Dict[str, Callable] = {}
 
         # ── Callback server 配置 ──
         self._callback_server = None
         self._callback_port: int = int(
-            _os.getenv("MATTERMOST_CALLBACK_PORT", "18065")
+            os.getenv("MATTERMOST_CALLBACK_PORT", "18065")
         )
-        self._callback_bind: str = _os.getenv(
+        self._callback_bind: str = os.getenv(
             "MATTERMOST_CALLBACK_BIND", "127.0.0.1"
         )
-        self._callback_url: str = _os.getenv(
+        self._callback_url: str = os.getenv(
             "MATTERMOST_CALLBACK_URL", ""
         )
-        self._callback_secret: str = _os.getenv(
+        self._callback_secret: str = os.getenv(
             "MATTERMOST_CALLBACK_SECRET", ""
         )
         # DM channel 缓存: user_id → dm_channel_id
@@ -113,10 +112,16 @@ class MattermostApprovalAdapter(MattermostAdapter):
     # 公共辅助方法
     # ══════════════════════════════════════════════════════════════════════
 
+    def _build_callback_url(self) -> str:
+        """构建回调 URL：环境变量优先，否则用 localhost 默认值."""
+        return self._callback_url or (
+            f"http://{self._callback_bind}:{self._callback_port}"
+            f"/mattermost/callback"
+        )
+
     def _get_allowed_users(self) -> set:
         """获取 MATTERMOST_ALLOWED_USERS 配置."""
-        import os as _os
-        allowed_str = _os.getenv("MATTERMOST_ALLOWED_USERS", "").strip()
+        allowed_str = os.getenv("MATTERMOST_ALLOWED_USERS", "").strip()
         if not allowed_str:
             return set()
         return {u.strip() for u in allowed_str.split(",") if u.strip()}
@@ -375,9 +380,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         current_model = self._get_current_model_for_session(channel_id, root_id)
 
         # 4. 渲染卡片（分组模式）
-        callback_url = self._callback_url or (
-            f"http://{self._callback_bind}:{self._callback_port}/mattermost/callback"
-        )
+        callback_url = self._build_callback_url()
         card = render_model_selector_card(
             callback_url=callback_url,
             channel_id=channel_id,
@@ -410,9 +413,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
           - Thread 中发送 → root_id = thread root post ID
           - Channel 顶层发送 → root_id = None
         """
-        callback_url = self._callback_url or (
-            f"http://{self._callback_bind}:{self._callback_port}/mattermost/callback"
-        )
+        callback_url = self._build_callback_url()
         card = render_new_session_confirm_card(
             callback_url=callback_url,
             channel_id=channel_id,
@@ -828,10 +829,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                 )
 
             # 2. 构建 callback URL
-            callback_url = self._callback_url or (
-                f"http://{self._callback_bind}:{self._callback_port}"
-                f"/mattermost/callback"
-            )
+            callback_url = self._build_callback_url()
 
             cmd_preview = (
                 command[:3800] + "..." if len(command) > 3800 else command
@@ -1169,8 +1167,6 @@ class MattermostApprovalAdapter(MattermostAdapter):
 
     # ══════════════════════════════════════════════════════════════════════
     # 生命周期覆写（启动/停止回调服务器）
-    # ══════════════════════════════════════════════════════════════════════
-
     # ══════════════════════════════════════════════════════════════════════
     # WebSocket 覆写 — 心跳优化 30s→15s（替代 P6 shell patch）
     # ══════════════════════════════════════════════════════════════════════
@@ -1547,9 +1543,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         - 有 choices → 每个选项渲染为一个按钮 + 「其他」按钮
         - 无 choices → 纯文本提问，Gateway text-intercept 自动捕获回复
         """
-        callback_url = self._callback_url or (
-            f"http://{self._callback_bind}:{self._callback_port}/mattermost/callback"
-        )
+        callback_url = self._build_callback_url()
         logger.info(
             "Mattermost: send_clarify — callback_url=%r _callback_url=%r card_choices=%d",
             callback_url, self._callback_url,
@@ -1597,6 +1591,200 @@ class MattermostApprovalAdapter(MattermostAdapter):
             clarify_id=clarify_id,
             session_key=session_key,
             metadata=metadata,
+        )
+
+    # ══════════════════════════════════════════════════════════════════════
+    # send_multiple_images() 覆写 — metadata → root_id（图片批量不进 Thread）
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def send_multiple_images(
+        self,
+        chat_id: str,
+        images: List[Tuple[str, str]],
+        metadata: Optional[Dict[str, Any]] = None,
+        human_delay: float = 0.0,
+    ) -> None:
+        """覆写父类 send_multiple_images：从 metadata 提取 thread_id 注入 root_id.
+
+        bundled adapter 的 send_multiple_images 接收 metadata 但构建 payload
+        时完全忽略，导致图片/媒体批量发送始终落到频道级而非 Thread。
+        """
+        if not images:
+            return
+
+        import mimetypes
+        import aiohttp
+        from pathlib import Path
+        from urllib.parse import unquote as _unquote
+
+        CHUNK = 5  # Mattermost post file_ids cap
+        chunks = [images[i:i + CHUNK] for i in range(0, len(images), CHUNK)]
+
+        # 提前解析 thread root_id（所有 chunk 共用）
+        root_id: Optional[str] = None
+        if metadata and metadata.get("thread_id"):
+            root_id = await self._get_thread_root_id(metadata["thread_id"])
+
+        for chunk_idx, chunk in enumerate(chunks):
+            if human_delay > 0 and chunk_idx > 0:
+                await asyncio.sleep(human_delay)
+
+            file_ids: List[str] = []
+            caption_parts: List[str] = []
+            try:
+                for image_url, alt_text in chunk:
+                    if alt_text:
+                        caption_parts.append(alt_text)
+
+                    if image_url.startswith("file://"):
+                        local_path = _unquote(image_url[7:])
+                        p = Path(local_path)
+                        if not p.exists():
+                            logger.warning("Mattermost: skipping missing image %s", local_path)
+                            continue
+                        fname = p.name
+                        ct = mimetypes.guess_type(fname)[0] or "image/png"
+                        file_data = p.read_bytes()
+                    else:
+                        from tools.url_safety import is_safe_url
+                        if not is_safe_url(image_url):
+                            logger.warning("Mattermost: blocked unsafe image URL in batch")
+                            continue
+                        try:
+                            async with self._session.get(
+                                image_url, timeout=aiohttp.ClientTimeout(total=30)
+                            ) as resp:
+                                if resp.status >= 400:
+                                    logger.warning(
+                                        "Mattermost: failed to download image (HTTP %d): %s",
+                                        resp.status, image_url[:80],
+                                    )
+                                    continue
+                                file_data = await resp.read()
+                                ct = resp.content_type or "image/png"
+                        except Exception as dl_err:
+                            logger.warning("Mattermost: download failed for %s: %s", image_url[:80], dl_err)
+                            continue
+                        fname = image_url.rsplit("/", 1)[-1].split("?")[0] or f"image_{len(file_ids)}.png"
+
+                    fid = await self._upload_file(chat_id, file_data, fname, ct)
+                    if fid:
+                        file_ids.append(fid)
+
+                if not file_ids:
+                    continue
+
+                payload: Dict[str, Any] = {
+                    "channel_id": chat_id,
+                    "message": "\n".join(caption_parts),
+                    "file_ids": file_ids,
+                }
+                # 🔧 修复：注入 root_id 确保图片进 Thread
+                if root_id:
+                    payload["root_id"] = root_id
+
+                logger.info(
+                    "Mattermost: sending %d image(s) as single post (chunk %d/%d)",
+                    len(file_ids), chunk_idx + 1, len(chunks),
+                )
+                data = await self._api_post("posts", payload)
+                if not data or "id" not in data:
+                    logger.warning("Mattermost: multi-image post failed, falling back")
+                    await super().send_multiple_images(chat_id, chunk, metadata, human_delay=human_delay)
+            except Exception as e:
+                logger.warning(
+                    "Mattermost: multi-image send failed (chunk %d/%d), falling back: %s",
+                    chunk_idx + 1, len(chunks), e, exc_info=True,
+                )
+                await super().send_multiple_images(chat_id, chunk, metadata, human_delay=human_delay)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # send_image / send_video / send_document 覆写 — metadata → reply_to 推导
+    # ══════════════════════════════════════════════════════════════════════
+    # 这些方法接收 metadata 但不使用它来推导 reply_to。Gateway 调用时传入
+    # metadata._thread_meta (包含 thread_id)，但 bundled adapter 直接丢弃。
+    # 覆写后从 metadata 推导 reply_to，后续 _send_local_file / _send_url_as_file
+    # 已有覆写会正确处理 Thread 路由。
+
+    def _derive_reply_to(
+        self,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        """从 metadata 推导 reply_to 当显式 reply_to 未提供时."""
+        if reply_to is None and metadata and metadata.get("thread_id"):
+            return metadata["thread_id"]
+        return reply_to
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """覆写父类 send_image：metadata → reply_to 推导."""
+        reply_to = self._derive_reply_to(reply_to, metadata)
+        return await self._send_url_as_file(
+            chat_id, image_url, caption, reply_to, "image"
+        )
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """覆写父类 send_image_file：metadata → reply_to 推导."""
+        reply_to = self._derive_reply_to(reply_to, metadata)
+        return await self._send_local_file(
+            chat_id, image_path, caption, reply_to
+        )
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """覆写父类 send_document：metadata → reply_to 推导."""
+        reply_to = self._derive_reply_to(reply_to, metadata)
+        return await self._send_local_file(
+            chat_id, file_path, caption, reply_to, file_name
+        )
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """覆写父类 send_video：metadata → reply_to 推导."""
+        reply_to = self._derive_reply_to(reply_to, metadata)
+        return await self._send_local_file(
+            chat_id, video_path, caption, reply_to
+        )
+
+    async def send_voice(
+        self,
+        chat_id: str,
+        audio_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """覆写父类 send_voice：metadata → reply_to 推导."""
+        reply_to = self._derive_reply_to(reply_to, metadata)
+        return await self._send_local_file(
+            chat_id, audio_path, caption, reply_to
         )
 
     # ══════════════════════════════════════════════════════════════════════
