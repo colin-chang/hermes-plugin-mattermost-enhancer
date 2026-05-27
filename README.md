@@ -141,17 +141,21 @@ Gray monospace footnote — subtle, glanceable. **Especially useful with multipl
 
 ## 🐛 What Bugs Are Fixed?
 
-Below are 7 bugs fixed by this project (plugin + companion script). Each includes the **real-world impact** so you can tell if you've encountered them.
+Below are 9 bugs fixed by this project (plugin + companion script). Each includes the **real-world impact** so you can tell if you've encountered them.
 
-| # | Bug Description | Real-World Impact | After Fix |
-|---|----------------|-------------------|------------|
-| **1** | Thread replies leak: Hermes replies in a Thread may appear in the main channel instead of the Thread | CRT mode — chat chaos, you can't find the AI's reply | Replies correctly stay in the current Thread |
-| **2** | Missing file spam: Hermes posts long error messages when an image/file can't be found | Chat flooded with `File not found: /tmp/xxx.png`, disrupting conversation | Silently skipped — no noise |
-| **3** | Typing indicator at wrong level: the "typing..." indicator appears at the channel while Hermes is thinking in a Thread | You wait in a Thread with no typing feedback | Typing correctly appears in the current Thread |
-| **4** | DM approval missing user_id: Hermes can't determine which user to send the approval DM to | Approval cards never arrive; dangerous commands may execute without approval | user_id properly passed; cards delivered on time |
-| **5** | Tool progress not routed to Thread: multi-step task progress ("Searching...", "Reading file...") only appears in the main channel | You wait in a Thread with zero visibility into progress — result just pops out at the end 💀 | Progress messages correctly appear in the current Thread; you see every step in real time |
-| **6** | AI questions too subtle: Hermes asks a question (multiple choice or open-ended) as plain text, easily missed in the conversation flow | You miss the question → no response → AI times out → also triggers a session split, AI answers nonsense 💀 | Questions rendered as interactive cards with buttons — prominent and clickable |
-| **7** | Session split (AI amnesia): When AI is waiting for your reply, your next message starts a new conversation — AI forgets everything | You're chatting fine in Thread A, then suddenly AI doesn't recognize you and gives random answers | Messages correctly delivered to the waiting AI; no new session created |
+| # | Bug Description | Real-World Impact | After Fix | Implementation |
+|---|----------------|-------------------|-----------|---------------|
+| **1** | Thread replies leak: Hermes replies in a Thread may appear in the main channel instead of the Thread | CRT mode — chat chaos, you can't find the AI's reply | Replies correctly stay in the current Thread | Shell Patch |
+| **2** | Missing file spam: Hermes posts long error messages when an image/file can't be found | Chat flooded with `File not found: /tmp/xxx.png`, disrupting conversation | Silently skipped — no noise | Adapter Override |
+| **3** | Typing indicator at wrong level: the "typing..." indicator appears at the channel while Hermes is thinking in a Thread | You wait in a Thread with no typing feedback | Typing correctly appears in the current Thread | Adapter Override |
+| **4** | DM approval missing user_id: Hermes can't determine which user to send the approval DM to | Approval cards may not arrive; dangerous commands may execute without approval | user_id properly passed; cards delivered on time | Shell Patch (optional, adapter has fallback) |
+| **5** | Tool progress not routed to Thread: multi-step task progress ("Searching...", "Reading file...") only appears in the main channel | You wait in a Thread with zero visibility into progress — result just pops out at the end 💀 | Progress messages correctly appear in the current Thread; you see every step in real time | Shell Patch |
+| **6** | AI questions too subtle: Hermes asks a question (multiple choice or open-ended) as plain text, easily missed in the conversation flow | You miss the question → no response → AI times out → also triggers a session split 💀 | Questions rendered as interactive cards with buttons — prominent and clickable | Adapter Override |
+| **7** | Session split (AI amnesia): When AI is waiting for your reply, your next message starts a new conversation — AI forgets everything | You're chatting fine in Thread A, then suddenly AI doesn't recognize you and gives random answers | Messages correctly delivered to the waiting AI; no new session created | Shell Patch |
+| **8** | WebSocket frequent disconnects: Mattermost WebSocket disconnects every ~50s (close 258) | Brief message loss, duplicate messages, reply lag | Heartbeat optimized to 15s, connection stable | Adapter Override |
+| **9** | Response fragmentation: AI replies split into multiple separate messages (commentary and body sent separately) | One reply arrives as 3-5 messages, poor reading experience | Commentary merged into stream, one message does the job | Shell Patch |
+
+> 💡 An upstream bug (ghost empty code fences in long code blocks) is also fixed via Shell Patch, but it's uncommon so it's not listed as a separate row.
 
 ---
 
@@ -176,20 +180,24 @@ You ──→ Mattermost ──→ Hermes Gateway (robot hub) ──→ AI Brain
 
 A plugin is like installing an app on your phone — it adds features and improves the experience, but can't modify the phone's operating system.
 
-- ✅ **What the plugin can change:** How the robot "replies to you" (adapter methods) — all features listed above are plugin-based
+- ✅ **What the plugin can change:** How the robot "replies to you" (adapter methods) — Bugs #2, #3, #6, #8 are all implemented via adapter overrides and take effect automatically when the plugin is installed
 - ❌ **What the plugin can't touch:** How the robot "gets woken up" (caller-side code) — this is deep in Hermes' source code
 
-Bug **#4** (DM approval missing user_id), Bug **#5** (tool progress not routed to Thread), and Bug **#7** (session split) are exactly in that untouchable caller-side code.
+Bugs marked **Shell Patch** in the table above (#1, #4, #5, #7, #9) are exactly in that untouchable caller-side code.
 
 ### What the Companion Script Does
 
-It fixes those three plugin-unreachable bugs by modifying Hermes' source files with minimal changes. Bug #7 (session split) has also been [submitted upstream](https://github.com/NousResearch/hermes-agent/pull/30669) — future Hermes releases may include the fix built-in.
+It fixes those plugin-unreachable bugs by modifying Hermes' source files with minimal changes. Fixes already submitted upstream:
+- Bug #5 (tool progress not in Thread) + Bug #9 (fallback missing reply_to) → [PR #33335](https://github.com/NousResearch/hermes-agent/pull/33335)
+- Bug #7 (session split) → [PR #30669](https://github.com/NousResearch/hermes-agent/pull/30669)
+
+Future Hermes releases may include these fixes built-in.
 
 ![Patch script output](images/patch.webp)
 
 ### Which One Do I Need?
 
-**Both.** Install the plugin first (for the features), then run the script (for the three low-level bug fixes).
+**Both.** Install the plugin first (for the features + adapter overrides), then run the script (for the 5 low-level bug fixes).
 
 > 💡 In the future, Hermes upstream may merge these fixes in, making the script unnecessary. Running `check` will then show "already applied" and you can ignore it.
 
