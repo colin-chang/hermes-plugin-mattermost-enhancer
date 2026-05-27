@@ -18,8 +18,43 @@ import logging
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from gateway.platforms.base import SendResult
-from gateway.platforms.mattermost import MattermostAdapter, MAX_POST_LENGTH
 from tools.approval import resolve_gateway_approval
+
+# Mattermost 基础适配器已从 gateway/platforms/ 移至 bundled plugin
+# (hermes-agent/plugins/platforms/mattermost/)。
+#
+# 插件系统会先加载 bundled mattermost-platform 为
+# hermes_plugins.platforms_mattermost，然后才加载 mattermost-enhancer。
+# 正常场景下 try 分支即命中；fallback 仅在非标准环境（如直接 pytest）下触发。
+try:
+    from hermes_plugins.platforms_mattermost.adapter import MattermostAdapter, MAX_POST_LENGTH
+except ImportError:
+    import importlib.util
+    import sys
+    from pathlib import Path as _Path
+
+    _bundled_mm = _Path(__file__).parent.parent.parent / "hermes-agent" / "plugins" / "platforms" / "mattermost"
+    _init = _bundled_mm / "__init__.py"
+    if _init.exists():
+        import types as _types
+        if "hermes_plugins" not in sys.modules:
+            _ns = _types.ModuleType("hermes_plugins")
+            _ns.__path__ = []
+            sys.modules["hermes_plugins"] = _ns
+        _spec = importlib.util.spec_from_file_location(
+            "hermes_plugins.platforms_mattermost",
+            _init,
+            submodule_search_locations=[str(_bundled_mm)],
+        )
+        if _spec and _spec.loader:
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules["hermes_plugins.platforms_mattermost"] = _mod
+            _spec.loader.exec_module(_mod)
+            from hermes_plugins.platforms_mattermost.adapter import MattermostAdapter, MAX_POST_LENGTH  # noqa: F811
+        else:
+            raise
+    else:
+        raise
 
 from .cards import (
     render_model_selector_card,
