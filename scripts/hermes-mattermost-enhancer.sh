@@ -17,7 +17,10 @@
 #   导致插件无法知道将审批卡片发送给谁。
 #
 # ~~问题 2 — 工具进度消息不进 Thread~~
-#   Hermes v0.14.0 上游已修复，patch 已移除。
+#   Hermes v0.14.0 上游虽然加入了 Platform.MATTERMOST，但保留了
+#   source.thread_id 条件——当用户在 Channel 根级别发消息时
+#   source.thread_id 为 None，导致 _progress_reply_to 仍为 None，
+#   工具进度消息不进 Thread。需对 Mattermost 去掉 source.thread_id 限制。
 #
 # 问题 2 — Clarify 等待时 Session 分裂（AI 失忆）：
 #   _handle_message 用 _quick_key 查 pending clarify，但 _quick_key
@@ -118,7 +121,43 @@ else:
 PYEOF
 }
 
-# ── Patch 2: Clarify Session 分裂修复 ─────────────────────────────────────
+# ── Patch 2: 工具进度消息进 Thread ──────────────────────────────────────
+
+patch_progress_thread() {
+    _do_patch "gateway/run.py" \
+        "Fix: task progress leaking to channel（修复「任务进度跑到频道里」的问题）" \
+        'or source.platform == Platform.MATTERMOST' <<'PYEOF'
+import sys
+file_path = sys.argv[1]
+with open(file_path, 'r') as f:
+    content = f.read()
+
+old = """        _progress_reply_to = (
+            event_message_id
+            if source.platform in (Platform.FEISHU, Platform.MATTERMOST) and source.thread_id and event_message_id
+            else None
+        )"""
+
+new = """        _progress_reply_to = (
+            event_message_id
+            if (
+                (source.platform == Platform.FEISHU and source.thread_id)
+                or source.platform == Platform.MATTERMOST
+            ) and event_message_id
+            else None
+        )"""
+
+if old in content:
+    content = content.replace(old, new)
+    with open(file_path, 'w') as f:
+        f.write(content)
+    print("APPLIED")
+else:
+    print("SKIP")
+PYEOF
+}
+
+# ── Patch 3: Clarify Session 分裂修复 ─────────────────────────────────────
 
 patch_clarify_session() {
     _do_patch "gateway/run.py" \
@@ -160,7 +199,7 @@ else:
 PYEOF
 }
 
-# ── Patch 3: Clarify 并发守护 ─────────────────────────────────────────────
+# ── Patch 4: Clarify 并发守护 ─────────────────────────────────────────────
 
 patch_clarify_guard() {
     _do_patch "gateway/run.py" \
@@ -216,7 +255,7 @@ check_status() {
     echo "═══════════════════════════════════════════════════"
     echo ""
 
-    local ok_count=0 total=3
+    local ok_count=0 total=4
 
     echo "  ── Check ①: Can approval cards reach your DMs? ──"
     echo "     （审批卡片能不能发到你的私信）"
@@ -229,7 +268,18 @@ check_status() {
     fi
 
     echo ""
-    echo "  ── Check ②: Will the AI forget what you were talking about? ──"
+    echo "  ── Check ②: Do tool progress messages stay inside the Thread? ──"
+    echo "     （工具调用进度消息是否在 Thread 内显示）"
+    echo ""
+    if grep -q 'or source.platform == Platform.MATTERMOST' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
+        ok "Progress in Thread ✅ (tool calls stay in thread, not in channel)（进度在 Thread 中 — 工具调用不会跑到频道里）"
+        ok_count=$((ok_count + 1))
+    else
+        warn "Progress may leak to channel ⚠️ (tool calls appear outside thread)（进度可能泄露到频道 — 工具调用跑到 Thread 外面了）"
+    fi
+
+    echo ""
+    echo "  ── Check ③: Will the AI forget what you were talking about? ──"
     echo "     （AI 会不会突然忘记刚才在聊什么——Clarify 等待时失忆）"
     echo ""
     if grep -q '_canonical_entry = self.session_store.get_or_create_session' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
@@ -240,7 +290,7 @@ check_status() {
     fi
 
     echo ""
-    echo "  ── Check ③: Is there a failsafe against duplicate sessions? ──"
+    echo "  ── Check ④: Is there a failsafe against duplicate sessions? ──"
     echo "     （有没有兜底防护防止并发创建重复会话）"
     echo ""
     if grep -q 'Gateway intercepted clarify at session guard' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
@@ -284,6 +334,7 @@ apply_all() {
     info "Fixing issues with Hermes in Mattermost...（正在修复 Mattermost 相关问题...）"
     echo ""
     patch_user_id
+    patch_progress_thread
     patch_clarify_session
     patch_clarify_guard
     echo ""
