@@ -92,7 +92,6 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 **现在：** Typing 提示正确出现在当前 Thread 中，你知道它在处理你的请求 ✅
 
-
 ![Typing 指示器示例效果](images/typing.webp)
 
 ---
@@ -121,11 +120,11 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 **原来：** 没有这个功能。你得输入 `/model` 看一下下拉菜单才知道当前模型 💀
 
-**现在：** 每条 Hermes 回复的末尾会自动加上一行脚注，告诉你当前模型和上下文占用了多少：
+**现在：** 每条 Hermes 回复的末尾会自动加上一行脚注，告诉你当前模型和上下文占用百分比：
 
 ![模型脚注效果](images/footer.webp)
 
-灰色等宽小字，不抢眼，瞟一眼就知道当前状态。**这在多 Thread 同时聊天时特别有用**——每个人 Thread 的脚注显示各自的模型，不会搞混。
+灰色等宽小字，不抢眼，瞟一眼就知道当前状态。**这在多 Thread 同时聊天时特别有用**——每个 Thread 的脚注显示各自的模型，不会搞混。
 
 > 💡 **如何开启**
 >
@@ -146,24 +145,29 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 ---
 
+---
+
 ## 🐛 修复了什么 Bug？
 
-下面是这个项目（插件 + 配套脚本）修掉的 10 个 Bug。每个 Bug 都附带了**造成的影响**，这样你能判断是否遇到过这些问题。
+下面是这个项目（插件 + 配套脚本）修掉的 11 个 Bug。每个 Bug 都附带了**造成的影响**，这样你能判断是否遇到过这些问题。
 
 | # | Bug 描述 | 造成的影响 | 修复后 | 实现方式 |
 |---|---------|-----------|--------|---------|
-| **1** | Thread 回复跑偏：Hermes 在 Thread 里回复时，消息可能出现在频道主聊天流，而不是 Thread 里 | CRT 模式下聊天混乱，你找不到 AI 的回复在哪 | 回复正确出现在当前 Thread 中 | Shell Patch |
+| **1** | Typing 标志位置错误：Hermes 在 Thread 里思考时，"正在输入..." 出现在频道级别 | 你在 Thread 里等回复，却看不到 Typing 标志 | Typing 正确出现在当前 Thread | Adapter 覆写 |
 | **2** | 文件不存在时刷屏：Hermes 要发送的图片/文件找不到了，会在聊天里贴一大段错误信息 | 聊天被 `File not found: /tmp/xxx.png` 刷屏，干扰正常对话 | 文件不存在时静默跳过，不打扰你 | Adapter 覆写 |
-| **3** | Typing 标志位置错误：Hermes 在 Thread 里思考时，"正在输入..."  出现在频道级别 | 你在 Thread 里等回复，却看不到 Typing 标志 | Typing 正确出现在当前 Thread | Adapter 覆写 |
-| **4** | DM 审批不知道发给谁：Hermes 要发审批私信，但不知道发给哪个用户（user_id 没传过来） | 审批卡片可能无法送达，危险操作可能被直接执行 | user_id 正确传递，审批卡片按时送到 | Shell Patch（可选，插件有降级） |
-| **5** | 工具链进度不进 Thread：Hermes 执行多步任务时，中间的进度提示只出现在频道主聊天流 | 你在 Thread 里等结果，过程中完全看不到进展 💀 | 进度消息正确出现在当前 Thread，实时看到每一步 | Shell Patch |
-| **6** | AI 提问不显眼：Hermes 向你提问时，只发一行纯文本，混在对话流里容易被错过 | 你没看到问题 → 没回复 → AI 卡住超时 → 触发会话分裂 💀 | 提问渲染为带按钮的交互卡片，醒目且可点击 | Adapter 覆写 |
-| **7** | 会话分裂（AI 答非所问）：AI 在等待你回复提问时，你发的下一条消息被当成"新对话"开启 | AI 完全失忆，开始瞎答 | 消息正确路由给等待中的 AI，不再创建新会话 | Shell Patch |
-| **8** | WebSocket 频繁断连：Mattermost WebSocket 每 ~50 秒断开重连（close 258） | 短暂消息丢失、重复消息、回复卡顿 | 心跳优化到 15 秒，连接稳定 | Adapter 覆写 |
-| **9** | 回复碎片化：AI 回复被拆成多条独立消息（评论文字和正文分开发送） | 一次回复收到 3-5 条消息，阅读体验差 | 评论合并到正文流中，一条消息搞定 | Shell Patch |
-| **10** | 媒体不进 Thread：AI 生成的图片/音频/视频/文档出现在频道主聊天流，而不是当前 Thread | 你在 Thread 里让 AI 生图 → 图片跳到频道主聊天流，打乱对话节奏 💀 | 所有媒体（图片、音频、视频、文档）正确出现在当前 Thread 中 | Adapter 覆写 |
+| **3** | AI 提问不显眼：Hermes 向你提问时，只发一行纯文本，混在对话流里容易被错过 | 你没看到问题 → 没回复 → AI 卡住超时 → 触发会话分裂 💀 | 提问渲染为带按钮的交互卡片，醒目且可点击 | Adapter 覆写 |
+| **4** | WebSocket 频繁断连：Mattermost WebSocket 每 ~50 秒断开重连（close 258） | 短暂消息丢失、重复消息、回复卡顿 | 心跳优化到 15 秒，连接稳定 | Adapter 覆写 |
+| **5** | 媒体不进 Thread：AI 生成的图片/音频/视频/文档出现在频道主聊天流，而不是当前 Thread | 你在 Thread 里让 AI 生图 → 图片跳到频道主聊天流，打乱对话节奏 💀 | 所有媒体（图片、音频、视频、文档）正确出现在当前 Thread 中 | Adapter 覆写 |
+| **6** | DM 审批不知道发给谁：Hermes 要发审批私信，但不知道发给哪个用户（user_id 没传过来） | 审批卡片可能无法送达，危险操作可能被直接执行 | user_id 正确传递，审批卡片按时送到 | Shell Patch（插件有降级方案） |
+| **7** | 工具链进度不进 Thread：Hermes 执行多步任务时，中间的进度提示只出现在频道主聊天流 | 你在 Thread 里等结果，过程中完全看不到进展 💀 | 进度消息正确出现在当前 Thread，实时看到每一步 | Shell Patch |
+| **8** | 会话分裂（AI 答非所问）：AI 在等待你回复 clarify 提问时，你发的下一条消息被当成"新对话"开启 | AI 完全失忆，开始瞎答 | 消息正确路由给等待中的 AI，不再创建新会话 | Shell Patch |
+| **9** | Clarify 并发守护缺失：在 clarify 等待期间，同时到达的消息可能绕过会话守卫创建重复会话 | 两个 AI 同时回复同一个 Thread，回复混乱 | 在创建新会话前拦截，路由到等待中的 clarify | Shell Patch |
+| **10** | auto-resume 串台：Gateway 重启后，同一频道多个 Thread 的 session 同时自动恢复，消息跨 Thread 泄漏 | 重启后在 Thread A 里看到 Thread B 的 AI 回复 | 每频道只恢复最近一个 session，Thread 之间互不干扰 | Shell Patch |
+| **11** | 回复碎片化：AI 回复被拆成多条独立消息（评论文字和正文分开发送） | 一次回复收到 3-5 条消息，阅读体验差 | 评论合并到正文流中，一条消息搞定 | Shell Patch（主脚本） |
 
-> 💡 还有一个上游 Bug（长代码块出现幽灵空代码围栏）也通过 Shell Patch 修复了，但不常见就不单列一行了。
+> 💡 **Bug #11** 由主脚本 `hermes-patches.sh` 修复（P50 评论合并），不是本插件的配套脚本。详见 `~/.hermes/scripts/hermes-patches.sh`。
+>
+> 💡 还有两个额外的上游 Bug 也通过主脚本修复：长代码块出现幽灵空围栏（P53）、流式 fallback 消息不进 Thread（P55）。虽然不常见，但都包含在同一个 `hermes-patches.sh` 中。
 
 ---
 
@@ -171,7 +175,7 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 ## 🧱 插件 vs 配套脚本，怎么理解？
 
-你可能注意到了，这个项目里除了插件（Plugin），还有一个 **配套 Shell 脚本**（`scripts/hermes-mattermost-enhancer.sh`）。这里用大白话解释一下。
+你可能注意到了，这个项目里除了插件（Plugin），还有一套 **补丁脚本**（Shell Patch）。这里用大白话解释一下。
 
 ### Hermes 的工作原理
 
@@ -188,27 +192,39 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 插件就像给手机装 App——能增加功能、优化体验，但不能改手机的底层系统。
 
-- ✅ **插件能改的**：机器人"怎么回复你"（适配器方法）——Bug #2、#3、#6、#8、#10 都是通过 adapter 覆写实现的，装了插件就自动生效
+- ✅ **插件能改的**：机器人"怎么回复你"（适配器方法）——Bug #1-5 都是通过 adapter 覆写实现的，装了插件就自动生效
 - ❌ **插件改不了的**：机器人"怎么被叫起来的"（调用方代码）——这部分在 Hermes 的底层源码里
 
-上面 Bug 表格中标注 **Shell Patch** 的 Bug（#1、#4、#5、#7、#9），就是插件够不到的地方。
+上面 Bug 表格中标注 **Shell Patch** 的 Bug（#6-10），就是插件够不到的地方。
 
-### 配套脚本是干什么的？
+### 补丁脚本是干什么的？
 
-修那些插件够不到的 Bug。它直接修改 Hermes 的源码文件，加了少量代码。已提交到上游的修复：
-- Bug #5（工具进度不进 Thread）+ Bug #9（fallback 丢失 reply_to）→ [PR #33335](https://github.com/NousResearch/hermes-agent/pull/33335)
-- Bug #7（会话分裂）→ [PR #30669](https://github.com/NousResearch/hermes-agent/pull/30669)
-- Bug #10（媒体不进 Thread）→ [PR #33391](https://github.com/NousResearch/hermes-agent/pull/33391)
+修那些插件够不到的 Bug。分两个脚本：
 
-将来 Hermes 官方版本可能会自带这些修复。
+- **配套脚本**（`scripts/hermes-mattermost-enhancer.sh`）：Mattermost 交互专属的 Gateway 层修复 — DM 审批路由 (P1)、工具进度进 Thread (P2)、clarify 会话处理 (P3/P4)、auto-resume 去重 (P5)
+- **主脚本**（`~/.hermes/scripts/hermes-patches.sh`）：平台无关的通用 Gateway 修复 — 评论合并 (P50)、幽灵代码围栏 (P53)、fallback 消息 Thread 路由 (P55)，以及 CLI 层修复（自定义 provider、模型白名单、cron 编码）
+
+> ⚠️ **当前状态：** 这些补丁目前以本地修复方式维护。部分已提交上游但尚未合入 Hermes 官方版本。建议每次升级 Hermes 后运行 `check` 确认状态——一旦上游合入，脚本会报告"已应用"。
 
 ![Patch脚本运行效果](images/patch.webp)
 
 ### 我该装哪个？
 
-**两个都要装。** 先装插件（实现主要功能 + adapter 覆写），再跑脚本（修 5 个底层 Bug）。
+**全部都要。** 先装插件（适配器覆写 + 功能），再跑两个脚本（底层 Bug 修复）：
 
-> 💡 将来 Hermes 官方可能会把这些 Bug 修复合并进去，到时候就不需要脚本了。到时候运行 `check` 会提示"已应用"，你就不用管它了。
+```bash
+# 1. 插件（适配器覆写 — #1-5）
+hermes plugins install colin-chang/hermes-plugin-mattermost-enhancer --enable
+
+# 2. 配套脚本（Mattermost Gateway 补丁 — #6-10）
+cd ~/.hermes/plugins/mattermost-enhancer
+./scripts/hermes-mattermost-enhancer.sh apply
+
+# 3. 主脚本（平台无关修复 — #11 + CLI 修复）
+~/.hermes/scripts/hermes-patches.sh apply
+```
+
+> 💡 将来 Hermes 官方可能会把这些 Bug 修复合并进去，到时候就不需要脚本了。运行 `check` 会提示"已应用"。
 
 ---
 
@@ -273,18 +289,20 @@ MATTERMOST_CALLBACK_URL=http://host.docker.internal:18065/mattermost/callback
 - ❌ **正常使用时**：不需要重复运行
 
 ```bash
-cd ~/.hermes/plugins/hermes-plugin-mattermost-enhancer
+cd ~/.hermes/plugins/mattermost-enhancer
 
-# 先检查当前状态（看看两个修复是否已应用）
+# 先检查当前状态（看看所有补丁是否已应用）
 ./scripts/hermes-mattermost-enhancer.sh check
 ```
 
-如果 `check` 显示未应用，执行修复：
+如果 `check` 显示未应用，执行补丁：
 
 ```bash
-# 应用修复（完成后会自动询问你是否立即重启）
+# 应用补丁（完成后会自动询问你是否立即重启）
 ./scripts/hermes-mattermost-enhancer.sh apply
 ```
+
+> 💡 别忘了主脚本：`~/.hermes/scripts/hermes-patches.sh apply` 修复平台无关的 Bug。
 
 🎉 **完成！** 现在去 Mattermost 里试试 `/model` 或者执行一条危险命令看看审批卡片吧。
 
@@ -350,11 +368,15 @@ cd ~/.hermes/plugins/hermes-plugin-mattermost-enhancer
 
 **Q: 插件和脚本要一起装吗？**
 
-A: 对。插件是"功能包"，脚本是"Bug 修复包"。两个都要。脚本只需要跑一次（`apply`），以后 Hermes 升级时可能需要再跑一次。
+A: 对。插件是"功能包"，脚本是"Bug 修复包"。三个组件都要。脚本只需要跑一次（`apply`），以后 Hermes 升级时可能需要再跑一次。
 
 **Q: 升级 Hermes 后怎么办？**
 
-A: Hermes 大版本升级后，源码可能被覆盖。建议再跑一次 `./scripts/hermes-mattermost-enhancer.sh check` 看看状态。
+A: Hermes 大版本升级后，源码可能被覆盖。建议两个脚本都跑一次 `check`：
+```bash
+~/.hermes/scripts/hermes-patches.sh check
+./scripts/hermes-mattermost-enhancer.sh check
+```
 
 **Q: 脚本会不会搞坏我的 Hermes？**
 
@@ -362,14 +384,15 @@ A: 不会。它只做了最小改动，你可以用 `check` 随时查看状态�
 
 **Q: 我不想装脚本，有什么影响？**
 
-A: 五个 Bug 得不到修复（上面标注「Shell Patch」的 #1、#4、#5、#7、#9）：
-- Thread 回复跑偏，消息可能出现在频道而非 Thread
+A: 几个 Bug 得不到修复（上面标注「Shell Patch」的 #6-11）：
 - DM 审批卡片收不到（因为没有你的 user_id）
 - 工具进度消息不会出现在 Thread 里（会跳到频道主聊天流）
-- 会话分裂：AI 提问等你回复时，你的回复可能被当成新对话（AI 失忆）
+- Clarify 会话分裂：新的消息可能被当成新对话（AI 失忆）
+- Clarify 期间可能创建重复会话
+- Gateway 重启后同频道多 Thread session 互相串台
 - 回复碎片化：AI 回复被拆成多条独立消息
 
-其他功能（Adapter 覆写的 #2、#3、#6、#8、#10）都正常工作。
+其他功能（Adapter 覆写的 #1-5）都正常工作。
 
 ---
 
@@ -379,12 +402,12 @@ A: 五个 Bug 得不到修复（上面标注「Shell Patch」的 #1、#4、#5、
 mattermost-enhancer/
 ├── plugin.yaml              # 插件元数据
 ├── __init__.py              # 插件入口
-├── adapter.py               # 核心逻辑（40+ 个方法）
+├── adapter.py               # 核心逻辑（50+ 个方法）
 ├── cards.py                 # 交互卡片模板
 ├── models.py                # 模型列表
 ├── callback_server.py       # 回调服务器
 ├── scripts/
-│   └── hermes-mattermost-enhancer.sh   # 配套 Shell 脚本
+│   └── hermes-mattermost-enhancer.sh   # 配套 Shell 脚本（Mattermost Gateway 补丁）
 ├── references/
 │   └── api-contracts.md     # Mattermost API 契约文档
 ├── README.md                # 英文文档

@@ -7,22 +7,44 @@
 # 修复 Hermes Agent 上游代码中影响 Mattermost 用户体验的 Gateway 缺陷。
 #
 # 为什么需要此脚本：
-#   这些问题修改的是 gateway/run.py、stream_consumer.py、base.py 等
-#   调用方代码，Hermes Platform Plugin 机制只能覆盖适配器方法，无法触及调用方。
+#   这些问题修改的是 gateway/run.py、adapter.py 等代码。
+#   Hermes Platform Plugin 机制只能覆盖适配器方法，无法触及调用方。
 #   详见插件 README。
 #
 # 已在插件 adapter 中实现的修复（不需要 shell patch）：
 #   ✅ WebSocket 心跳 30s→15s — 覆写 _ws_connect_and_listen()
 #   ✅ _api_put 缺少 timeout — 覆写 edit_message() 自实现 HTTP PUT
 #
-# Patch 列表：
-#   P1. DM 审批传入 user_id（run.py）— 可选，插件已有降级方案
-#   P2. 工具进度消息进 Thread（run.py）— 上游 v0.14.0 修复不完整
-#   P3. Clarify Session 分裂修复（run.py）
-#   P4. Clarify 并发守护（run.py）
-#   P5. 评论→正文合并，防止消息碎片化（stream_consumer.py）
-#   P6. stream fallback 丢失 reply_to（stream_consumer.py）
-#   P7. 幽灵代码围栏修复（base.py）
+# 活跃 patch（当前 6 个）：
+#   P1. DM 审批传入 user_id（gateway/run.py）
+#       Mattermost DM 频道需要 user_id 才能把审批卡片发给正确的人。
+#       其他平台的 DM 机制不同，不受影响。
+#   P2. 工具进度消息进 Thread（gateway/run.py）
+#       上游 v0.14.0 修复不完整 — 要求 thread_id 但 Mattermost
+#       auto-resume 后第一条消息还没有 thread_id。
+#   P3. Clarify Session 分裂修复（gateway/run.py）
+#       Mattermost Thread 模型下 thread_sessions_per_user 配置
+#       导致 _quick_key ≠ canonical session key，Clarify 响应发到
+#       错误的 session。
+#   P4. Clarify 并发守护（gateway/run.py）
+#       同上场景，session key 不匹配导致 Clarify 阻塞时
+#       并发创建重复 Session。
+#   P5. Session 串台修复（gateway/run.py）
+#       Gateway 重启后同 channel 多 Thread auto-resume 时
+#       响应串到错误的 Thread。
+#   P6. 批量图片 Thread 路由（adapter.py）
+#       send_multiple_images() 忽略 metadata 中的 thread_id，
+#       批量图片始终落地主频道。
+#
+#   已消除：
+#     ❌ 评论→正文合并              → 已迁至主脚本 hermes-patches.sh（平台通用修复）
+#     ❌ 幽灵代码围栏               → 已迁至主脚本 hermes-patches.sh（平台通用修复）
+#     ❌ stream fallback 丢失 reply_to → 已迁至主脚本 hermes-patches.sh（平台通用修复）
+#
+#   版本感知：
+#     最后验证: 2026-05-28
+#     Hermes 版本: v2026.5.16-1195-g458a94e42
+#     验证方式: git show origin/main:<file> | grep "<check_pattern>"
 #
 # 使用方法：
 #   ./scripts/hermes-mattermost-enhancer.sh check   # 检查状态
@@ -46,7 +68,8 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 ok()      { echo -e "${GREEN}[OK]${NC}    $1"; }
-warn()    { echo -e "${RED}[FAIL]${NC}  $1"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC}  $1"; }
+fail()    { echo -e "${RED}[FAIL]${NC}  $1"; }
 optional(){ echo -e "${YELLOW}[OPT]${NC}    $1"; }
 info()    { echo -e "${CYAN}[INFO]${NC}  $1"; }
 
@@ -58,30 +81,37 @@ _do_patch() {
     local check="$3"
 
     if [[ ! -f "$file" ]]; then
-        warn "File not found: $1, skipped（文件不存在，已跳过）"
+        fail "File not found: $1, skipped（文件不存在，已跳过）"
         return 1
     fi
     if grep -q "$check" "$file" 2>/dev/null; then
-        ok "$label — already applied ✅, skipping（已经好了，跳过）"
+        ok "$label — already applied, skipping（已经好了，跳过）"
         return 0
     fi
 
-    python3 - "$file"
+    local output
+    output=$(python3 - "$file" 2>&1)
     local rc=$?
-    if [[ $rc -eq 0 ]]; then
-        ok "$label — applied successfully ✅（修复成功）"
+    if [[ $rc -eq 0 && "$output" == *"APPLIED"* ]]; then
+        ok "$label — applied successfully（修复成功）"
+    elif [[ $rc -eq 0 && "$output" == *"SKIP"* ]]; then
+        ok "$label — skipped, code already matches（跳过，代码已符合预期）"
     else
-        warn "$label — failed ❌, check if Hermes is properly installed（修复失败，请检查 Hermes 是否正常安装）"
+        fail "$label — failed, check if Hermes is properly installed（修复失败，请检查 Hermes 是否正常安装）"
+        [[ -n "$output" ]] && echo "  $output"
     fi
     return $rc
 }
 
-# ── P1: DM 审批传入 user_id（可选 — 插件已有 _get_user_id_from_channel 降级） ──
+# ── P1: DM 审批传入 user_id ─────────────────────────────────────────────
+#
+# Mattermost DM 频道需要 user_id 才能定位到正确的用户。
+# 插件已有 _get_user_id_from_channel 降级方案，但直接传入更可靠。
 
 patch_user_id() {
     _do_patch "gateway/run.py" \
         "Fix: approval card not being delivered（修复「审批卡片收不到」的问题）" \
-        'user_id=source.user_id' <<'PYEOF'
+        'user_id=source.user_id.*hasattr' <<'PYEOF'
 import sys
 file_path = sys.argv[1]
 with open(file_path, 'r') as f:
@@ -104,7 +134,9 @@ new = '''                            _status_adapter.send_exec_approval(
                                 user_id=source.user_id if hasattr(source, 'user_id') else None,
                             ),'''
 
-if old in content and "user_id=source.user_id" not in content:
+# Only apply if the OLD (unpatched) code exists AND the NEW line
+# is not already present (prevent double-patch on repeated runs).
+if old in content and "user_id=source.user_id if hasattr" not in content:
     content = content.replace(old, new)
     with open(file_path, 'w') as f:
         f.write(content)
@@ -115,6 +147,13 @@ PYEOF
 }
 
 # ── P2: 工具进度消息进 Thread ───────────────────────────────────────────
+#
+# 上游 v0.14.0 修复了 Mattermost 进度消息的 Thread 路由，但不完整：
+#   `source.platform in (FEISHU, MATTERMOST) and source.thread_id`
+# 要求必须有 thread_id。但 auto-resume 后的第一条消息还没有 thread_id，
+# 此时进度消息会跑回主频道。
+#
+# 修复：拆成 or 分支 — 只要 platform == MATTERMOST 就绑定 reply_to。
 
 patch_progress_thread() {
     _do_patch "gateway/run.py" \
@@ -151,10 +190,15 @@ PYEOF
 }
 
 # ── P3: Clarify Session 分裂修复 ────────────────────────────────────────
+#
+# Mattermost Thread 模型下，thread_sessions_per_user 配置会导致
+# _quick_key ≠ canonical session key。Clarify 使用 _quick_key 查找
+# pending clarify，找不到就以为是新消息，创建新的 agent session，
+# 导致「AI 失忆」（之前的对话上下文丢失）。
 
 patch_clarify_session() {
     _do_patch "gateway/run.py" \
-        "Fix: clarify session split causing AI amnesia（修复「Clarify 等待时新消息打断导致 AI 失忆」的问题）" \
+        "Fix: clarify session split causing AI amnesia（修复「Clarify 打断导致 AI 失忆」的问题）" \
         '_canonical_entry = self.session_store.get_or_create_session' <<'PYEOF'
 import sys
 file_path = sys.argv[1]
@@ -193,39 +237,45 @@ PYEOF
 }
 
 # ── P4: Clarify 并发守护 ────────────────────────────────────────────────
+#
+# P3 修复了「找到 pending clarify」的问题，但如果 Clarify 正在阻塞
+# 等待用户回复时，新消息会因为找不到 agent（_quick_key 不匹配）
+# 而触发新的 Session 创建，导致并发重复 Session。
+#
+# 修复：在 session 创建前多加一道 canonical key 的 Clarify 检查。
 
 patch_clarify_guard() {
     _do_patch "gateway/run.py" \
-        "Fix: clarify concurrency guard against duplicate sessions（修复「Clarify 阻塞时并发创建重复会话」的问题）" \
+        "Fix: clarify concurrency guard against duplicate sessions（修复「Clarify 并发创建重复会话」的问题）" \
         'Gateway intercepted clarify at session guard' <<'PYEOF'
 import sys
 file_path = sys.argv[1]
 with open(file_path, 'r') as f:
     content = f.read()
 
-old = "        session_key = session_entry.session_key\n        self._cache_session_source(session_key, source)"
+old = "        session_key = session_entry.session_key\\n        self._cache_session_source(session_key, source)"
 
-new = "        session_key = session_entry.session_key\n"
-new += "        # Belt-and-suspenders clarify check using the canonical session\n"
-new += "        # key.  When _quick_key != session_key and no agent is found in\n"
-new += "        # _running_agents under _quick_key, intercept the message before\n"
-new += "        # a new Session spawns.\n"
-new += "        if session_key != _quick_key:\n"
-new += "            try:\n"
-new += '                from tools import clarify_gateway as _clarify_mod2\n'
-new += "                _pc = _clarify_mod2.get_pending_for_session(session_key)\n"
-new += "                if _pc is not None:\n"
-new += '                    _raw = (event.text or "").strip()\n'
-new += '                    if _raw and not _raw.startswith("/"):\n'
-new += "                        _clarify_mod2.resolve_gateway_clarify(_pc.clarify_id, _raw)\n"
-new += "                        logger.info(\n"
-new += '                            "Gateway intercepted clarify at session guard "\n'
-new += '                            "(session=%s, clarify_id=%s)",\n'
-new += "                            session_key, _pc.clarify_id,\n"
-new += "                        )\n"
-new += "                        return None  # consumed by clarify — no new turn\n"
-new += "            except Exception:\n"
-new += "                pass\n"
+new = "        session_key = session_entry.session_key\\n"
+new += "        # Belt-and-suspenders clarify check using the canonical session\\n"
+new += "        # key.  When _quick_key != session_key and no agent is found in\\n"
+new += "        # _running_agents under _quick_key, intercept the message before\\n"
+new += "        # a new Session spawns.\\n"
+new += "        if session_key != _quick_key:\\n"
+new += "            try:\\n"
+new += '                from tools import clarify_gateway as _clarify_mod2\\n'
+new += "                _pc = _clarify_mod2.get_pending_for_session(session_key)\\n"
+new += "                if _pc is not None:\\n"
+new += '                    _raw = (event.text or "").strip()\\n'
+new += '                    if _raw and not _raw.startswith("/"):\\n'
+new += "                        _clarify_mod2.resolve_gateway_clarify(_pc.clarify_id, _raw)\\n"
+new += "                        logger.info(\\n"
+new += '                            "Gateway intercepted clarify at session guard "\\n'
+new += '                            "(session=%s, clarify_id=%s)",\\n'
+new += "                            session_key, _pc.clarify_id,\\n"
+new += "                        )\\n"
+new += "                        return None  # consumed by clarify — no new turn\\n"
+new += "            except Exception:\\n"
+new += "                pass\\n"
 new += "        self._cache_session_source(session_key, source)"
 
 if old in content:
@@ -238,30 +288,53 @@ else:
 PYEOF
 }
 
-# ── P5: 评论→正文合并（防止消息碎片化） ─────────────────────────────────
+# ── P5: Session 串台修复 — 同 channel 多 thread auto-resume 去重 ──────
+#
+# Gateway 重启时，同一 channel 下多个 Thread 的 session 会同时 auto-resume。
+# 此时响应可能从 Thread A 的 session 串到 Thread B，用户看到不相关的内容。
+#
+# 修复：auto-resume 候选去重，每 (platform, chat_id) 只保留 updated_at 最新的。
 
-patch_commentary_merge() {
-    _do_patch "gateway/stream_consumer.py" \
-        "Fix: response fragmented into multiple messages（修复「回复碎成很多条消息」的问题）" \
-        'Accumulate commentary' <<'PYEOF'
+patch_session_dedup() {
+    _do_patch "gateway/run.py" \
+        "Fix: auto-resume session leaking into wrong thread（修复「Gateway重启后多条Thread session串台」的问题）" \
+        'Deduplicate.*keep only the most recent' <<'PYEOF'
 import sys
 file_path = sys.argv[1]
 with open(file_path, "r") as f:
     content = f.read()
 
-old = """                if commentary_text is not None:
-                    self._reset_segment_state()
-                    await self._send_commentary(commentary_text)
-                    self._last_edit_time = time.monotonic()
-                    self._reset_segment_state()"""
+old = """        except Exception as exc:
+            logger.warning("Failed to enumerate resume-pending sessions: %s", exc)
+            return 0
 
-new = """                if commentary_text is not None:
-                    # Accumulate commentary into the stream buffer instead of
-                    # sending as a separate message.  Prevents response fragmentation
-                    # across multiple messages on platforms like Mattermost.
-                    if self._accumulated:
-                        self._accumulated += "\\n\\n"
-                    self._accumulated += commentary_text"""
+        now = datetime.now()"""
+
+new = """        except Exception as exc:
+            logger.warning("Failed to enumerate resume-pending sessions: %s", exc)
+            return 0
+
+        # Deduplicate: keep only the most recent session per (platform, chat_id).
+        # When multiple threads in the same channel are auto-resumed
+        # simultaneously (e.g. after a gateway crash), responses from one
+        # thread can leak into another — the user sees a message about
+        # an unrelated topic appearing in their current thread.
+        _per_chat: dict = {}
+        for entry in candidates:
+            key = (entry.origin.platform, entry.origin.chat_id)
+            existing = _per_chat.get(key)
+            if (
+                existing is None
+                or (
+                    entry.updated_at
+                    and existing.updated_at
+                    and entry.updated_at > existing.updated_at
+                )
+            ):
+                _per_chat[key] = entry
+        candidates = list(_per_chat.values())
+
+        now = datetime.now()"""
 
 if old in content:
     content = content.replace(old, new)
@@ -273,86 +346,53 @@ else:
 PYEOF
 }
 
-# ── P6: stream fallback 丢失 reply_to ───────────────────────────────────
+# ── P6: 批量图片 Thread 路由（bf178fe） ─────────────────────────────────
+#
+# send_multiple_images() 接收 metadata（含 thread_id）但忽略它，
+# 批量图片上传始终落地主频道而非当前 Thread。
+#
+# 修复：从 metadata 提取 thread_id，resolve 为 root_id，
+# 在 _reply_mode == 'thread' 时注入 Mattermost post payload。
 
-patch_stream_fallback_reply_to() {
-    _do_patch "gateway/stream_consumer.py" \
-        "Fix: thread replies lost on fallback send（修复「Thread回复在stream fallback时丢失」的问题）" \
-        'reply_to=self._initial_reply_to_id' <<'PYEOF'
+patch_media_thread() {
+    _do_patch "plugins/platforms/mattermost/adapter.py" \
+        "Fix: batch images land in channel not thread（修复「批量图片跑到频道里而非 Thread」的问题）" \
+        'propagate thread_id from metadata' <<'PYEOF'
 import sys
 file_path = sys.argv[1]
 with open(file_path, "r") as f:
     content = f.read()
 
-old = """                result = await self.adapter.send(
-                    chat_id=self.chat_id,
-                    content=chunk,
-                    metadata=self.metadata,
-                )"""
+old = """                    "message": "\\n".join(caption_parts),
+                    "file_ids": file_ids,
+                }
+                logger.info(
+                    "Mattermost: sending %d image(s) as single post (chunk %d/%d)",
+                    len(file_ids), chunk_idx + 1, len(chunks),
+                )
+                data = await self._api_post("posts", payload)"""
 
-new = """                result = await self.adapter.send(
-                    chat_id=self.chat_id,
-                    content=chunk,
-                    reply_to=self._initial_reply_to_id,
-                    metadata=self.metadata,
-                )"""
+new = """                    "message": "\\n".join(caption_parts),
+                    "file_ids": file_ids,
+                }
+                # Thread support: propagate thread_id from metadata
+                # (set by the Gateway runner's _thread_meta) so batch
+                # images appear in the correct Thread.
+                if (
+                    metadata
+                    and metadata.get("thread_id")
+                    and self._reply_mode == "thread"
+                ):
+                    payload["root_id"] = await self._resolve_root_id(
+                        metadata["thread_id"]
+                    )
+                logger.info(
+                    "Mattermost: sending %d image(s) as single post (chunk %d/%d)",
+                    len(file_ids), chunk_idx + 1, len(chunks),
+                )
+                data = await self._api_post("posts", payload)"""
 
-if old in content:
-    content = content.replace(old, new)
-    with open(file_path, "w") as f:
-        f.write(content)
-    print("APPLIED")
-else:
-    print("SKIP")
-PYEOF
-}
-
-# ── P7: 幽灵代码围栏修复 ────────────────────────────────────────────────
-
-patch_ghost_fence() {
-    _do_patch "gateway/platforms/base.py" \
-        "Fix: ghost empty code blocks in long responses（修复「长代码块出现幽灵空代码围栏」的问题）" \
-        'reopening the fence would create' <<'PYEOF'
-import sys
-file_path = sys.argv[1]
-with open(file_path, "r") as f:
-    content = f.read()
-
-old = """        while remaining:
-            # If we're continuing a code block from the previous chunk,
-            # prepend a new opening fence with the same language tag.
-            prefix = f\"```{carry_lang}\\n\" if carry_lang is not None else \"\""""
-
-new = """        while remaining:
-            # When the previous chunk's closing fence is immediately followed
-            # by the original content's own closing `` ``` `` (because the
-            # split cut right before it), reopening the fence would create a
-            # ghost empty block::
-            #
-            #     ```python
-            #     ```
-            #
-            # Detect this and consume the original closing fence without
-            # reopening, so the code block ends cleanly at the chunk boundary.
-            if carry_lang is not None:
-                stripped_line = remaining.lstrip().split("\\n", 1)[0].rstrip()
-                if stripped_line.startswith("```") and not stripped_line[3:].strip():
-                    # The first meaningful line is a bare `` ``` `` — the
-                    # original closing fence.  Consume it and clear the
-                    # carry so we don't reopen.
-                    idx = remaining.index("```")
-                    remaining = remaining[idx + 3:]
-                    if remaining.startswith("\\n"):
-                        remaining = remaining[1:]
-                    remaining = remaining.lstrip()
-                    carry_lang = None
-                    continue
-
-            # If we're continuing a code block from the previous chunk,
-            # prepend a new opening fence with the same language tag.
-            prefix = f\"```{carry_lang}\\n\" if carry_lang is not None else \"\""""
-
-if old in content:
+if old in content and "propagate thread_id from metadata" not in content:
     content = content.replace(old, new)
     with open(file_path, "w") as f:
         f.write(content)
@@ -367,109 +407,70 @@ PYEOF
 check_status() {
     echo ""
     echo "═══════════════════════════════════════════════════"
-    echo "  🔍 Checking if your Hermes fully supports Mattermost..."
-    echo "     （正在检查你的 Hermes 是否完整支持 Mattermost）"
+    echo "  🔍 Checking Mattermost patches..."
+    echo "     （正在检查 Mattermost 补丁）"
     echo "═══════════════════════════════════════════════════"
     echo ""
 
-    local ok_count=0 total=7 opt_count=0
-
-    # ── P1（可选）──
-    echo "  ── Check ①: Can approval cards reach your DMs? [OPTIONAL] ──"
-    echo "     （审批卡片能不能发到你的私信 — 可选优化）"
+    # ── Built-in capabilities (adapter override, no shell patch needed) ──
+    info "WebSocket heartbeat 15s — adapter override（WebSocket 心跳 15 秒）"
+    info "Edit message timeout 30s — adapter override（编辑消息 30 秒超时）"
     echo ""
-    if grep -q 'user_id=source.user_id' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
-        optional "Approval card optimization ✅ (Hermes passes user_id directly, saves 1 API call)（审批优化 — Hermes 直接传 user_id，省一次请求）"
+
+    local ok_count=0 total=6
+
+    # P1
+    if grep -q 'user_id=source.user_id.*hasattr' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
+        ok "Fix: approval card not being delivered（修复「审批卡片收不到」的问题）"
         ok_count=$((ok_count + 1))
     else
-        optional "Approval card fallback ⚠️ (adapter queries channel members — works but extra API call)（审批降级 — adapter 查 channel members，可用但多一次请求）"
-        optional "  → Apply P1 patch to optimize: $0 apply（应用 P1 可优化）"
+        warn "Fix: approval card not being delivered（修复「审批卡片收不到」的问题）"
     fi
 
-    # ── P2 ──
-    echo ""
-    echo "  ── Check ②: Do tool progress messages stay inside the Thread? ──"
-    echo "     （工具调用进度消息是否在 Thread 内显示）"
-    echo ""
+    # P2
     if grep -q 'or source.platform == Platform.MATTERMOST' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
-        ok "Progress in Thread ✅ (tool calls stay in thread, not in channel)（进度在 Thread 中 — 工具调用不会跑到频道里）"
+        ok "Fix: task progress leaking to channel（修复「任务进度跑到频道里」的问题）"
         ok_count=$((ok_count + 1))
     else
-        warn "Progress may leak to channel ⚠️ (tool calls appear outside thread)（进度可能泄露到频道 — 工具调用跑到 Thread 外面了）"
+        warn "Fix: task progress leaking to channel（修复「任务进度跑到频道里」的问题）"
     fi
 
-    # ── P3 ──
-    echo ""
-    echo "  ── Check ③: Will the AI forget what you were talking about? ──"
-    echo "     （AI 会不会突然忘记刚才在聊什么——Clarify 等待时失忆）"
-    echo ""
+    # P3
     if grep -q '_canonical_entry = self.session_store.get_or_create_session' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
-        ok "No more AI amnesia ✅ (clarify replies stay in the same session)（不会失忆了 — Clarify 回复保持在同一会话中）"
+        ok "Fix: clarify session split causing AI amnesia（修复「Clarify 打断导致 AI 失忆」的问题）"
         ok_count=$((ok_count + 1))
     else
-        warn "AI may forget context ⚠️ (new session created while waiting for clarify reply)（AI 可能失忆 — 等待 Clarify 回复时可能创建新会话）"
+        warn "Fix: clarify session split causing AI amnesia（修复「Clarify 打断导致 AI 失忆」的问题）"
     fi
 
-    # ── P4 ──
-    echo ""
-    echo "  ── Check ④: Is there a failsafe against duplicate sessions? ──"
-    echo "     （有没有兜底防护防止并发创建重复会话）"
-    echo ""
+    # P4
     if grep -q 'Gateway intercepted clarify at session guard' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
-        ok "Failsafe active ✅ (last-moment guard prevents duplicate sessions)（兜底防护已激活 — 最后一刻拦截重复会话）"
+        ok "Fix: clarify concurrency guard against duplicate sessions（修复「Clarify 并发创建重复会话」的问题）"
         ok_count=$((ok_count + 1))
     else
-        warn "No failsafe ⚠️ (rare race condition could still split sessions)（缺少兜底防护 — 极端情况下仍可能分裂会话）"
+        warn "Fix: clarify concurrency guard against duplicate sessions（修复「Clarify 并发创建重复会话」的问题）"
     fi
 
-    # ── P5 ──
-    echo ""
-    echo "  ── Check ⑤: Are responses fragmented into multiple messages? ──"
-    echo "     （回复会不会碎成很多条消息）"
-    echo ""
-    if grep -q 'Accumulate commentary' "${AGENT_DIR}/gateway/stream_consumer.py" 2>/dev/null; then
-        ok "No fragmentation ✅ (commentary merged into stream)（不会碎片化 — 评论合并到正文流中）"
+    # P5
+    if grep -q 'Deduplicate.*keep only the most recent' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
+        ok "Fix: auto-resume session leaking into wrong thread（修复「Gateway重启后 session 串台」的问题）"
         ok_count=$((ok_count + 1))
     else
-        warn "Responses may fragment ⚠️ (commentary sent as separate messages)（回复可能碎片化 — 评论作为独立消息发送）"
+        warn "Fix: auto-resume session leaking into wrong thread（修复「Gateway重启后 session 串台」的问题）"
     fi
 
-    # ── P6 ──
-    echo ""
-    echo "  ── Check ⑥: Do fallback sends preserve Thread routing? ──"
-    echo "     （fallback 发送是否保持 Thread 路由）"
-    echo ""
-    if grep -q 'reply_to=self._initial_reply_to_id' "${AGENT_DIR}/gateway/stream_consumer.py" 2>/dev/null; then
-        ok "Thread routing OK ✅ (fallback sends include reply_to)（Thread 路由正常 — fallback 发送包含 reply_to）"
+    # P6
+    if grep -q 'propagate thread_id from metadata' "${AGENT_DIR}/plugins/platforms/mattermost/adapter.py" 2>/dev/null; then
+        ok "Fix: batch images land in channel not thread（修复「批量图片跑到频道里」的问题）"
         ok_count=$((ok_count + 1))
     else
-        warn "Thread routing broken ⚠️ (fallback sends missing reply_to, replies leak to channel)（Thread 路由丢失 — fallback 发送缺少 reply_to，回复跑到频道根级别）"
+        warn "Fix: batch images land in channel not thread（修复「批量图片跑到频道里」的问题）"
     fi
-
-    # ── P7 ──
-    echo ""
-    echo "  ── Check ⑦: Any ghost empty code blocks? ──"
-    echo "     （长代码块有没有幽灵空代码围栏）"
-    echo ""
-    if grep -q 'reopening the fence would create' "${AGENT_DIR}/gateway/platforms/base.py" 2>/dev/null; then
-        ok "No ghost fences ✅ (truncate_message handles chunk boundaries correctly)（没有幽灵围栏 — 长代码块分片边界处理正确）"
-        ok_count=$((ok_count + 1))
-    else
-        warn "Ghost fences possible ⚠️ (empty code blocks appear in long code responses)（可能有幽灵围栏 — 长代码回复中出现空代码块）"
-    fi
-
-    # ── 插件内部实现的检查（始终生效，无需 patch） ──
-    echo ""
-    echo "  ── Built-in checks (always active, no patch needed): ──"
-    echo "     （内置检查 — 始终生效，无需 patch）"
-    echo ""
-    ok "WebSocket heartbeat 15s ✅ (adapter._ws_connect_and_listen override)（WebSocket 心跳 15 秒 — adapter 覆写）"
-    ok "Edit message timeout 30s ✅ (adapter.edit_message override)（编辑消息 30 秒超时 — adapter 覆写）"
 
     echo ""
     echo "───────────────────────────────────────────────────"
-    echo "  Shell patches: ${ok_count}/${total} required + ${opt_count} optional"
-    echo "  （Shell 补丁：${ok_count}/${total} 必需 + ${opt_count} 可选）"
+    echo "  Shell patches: ${ok_count}/${total} required"
+    echo "  （Shell 补丁：${ok_count}/${total} 必需）"
     echo "───────────────────────────────────────────────────"
     echo ""
 
@@ -478,7 +479,7 @@ check_status() {
     elif [[ $ok_count -eq 0 ]]; then
         warn "No patches applied yet, run: $0 apply（还没有安装任何补丁，建议运行：$0 apply）"
     else
-        warn "Some required patches still missing (${ok_count}/${total}), run: $0 apply（还有必需补丁没装完 ${ok_count}/${total}，建议运行：$0 apply）"
+        warn "Some required patches still missing (${ok_count}/${total}), run: $0 apply（还有必需补丁没装完，建议运行：$0 apply）"
     fi
 }
 
@@ -488,9 +489,9 @@ restart_gateway() {
     echo ""
     info "Restarting Hermes...（正在重启 Hermes）"
     if hermes gateway restart 2>&1; then
-        ok "Restarted ✅ — patches are now active!（已重启 — 补丁生效了！）"
+        ok "Restarted — patches are now active!（已重启 — 补丁生效了！）"
     else
-        warn "Restart failed, manually run: hermes gateway restart（重启失败，请手动执行：hermes gateway restart）"
+        fail "Restart failed, manually run: hermes gateway restart（重启失败，请手动执行：hermes gateway restart）"
     fi
     echo ""
 }
@@ -504,9 +505,8 @@ apply_all() {
     patch_progress_thread
     patch_clarify_session
     patch_clarify_guard
-    patch_commentary_merge
-    patch_stream_fallback_reply_to
-    patch_ghost_fence
+    patch_session_dedup
+    patch_media_thread
     echo ""
     ok "Patches applied!（补丁完成！）"
     echo ""
