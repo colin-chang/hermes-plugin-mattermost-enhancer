@@ -13,6 +13,7 @@ MattermostApprovalAdapter — 继承内置 MattermostAdapter，扩展 DM 审批 
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
@@ -72,6 +73,12 @@ logger = logging.getLogger(__name__)
 class MattermostApprovalAdapter(MattermostAdapter):
     """Mattermost 适配器 — DM 审批 + /model 卡片 + /new 确认。"""
 
+    # Gateway stream_consumer 用 getattr(adapter, "MAX_MESSAGE_LENGTH", 4096)
+    # 获取消息长度限制。bundled adapter 只定义了 MAX_POST_LENGTH (4000)，
+    # 没有 MAX_MESSAGE_LENGTH，导致 gateway 使用默认值 4096——超出
+    # Mattermost 的 4000 字符限制，造成消息被静默截断。
+    MAX_MESSAGE_LENGTH = MAX_POST_LENGTH  # 4000
+
     def __init__(self, config):
         import os as _os
 
@@ -94,6 +101,10 @@ class MattermostApprovalAdapter(MattermostAdapter):
         )
         # DM channel 缓存: user_id → dm_channel_id
         self._dm_cache: Dict[str, str] = {}
+        # root_id 缓存: post_id → (root_id_or_None, timestamp)
+        # 避免每次 send() 都调 API GET（WebSocket 不稳定时频繁超时）
+        self._root_id_cache: Dict[str, Tuple[Optional[str], float]] = {}
+        self._root_id_cache_ttl: float = 300.0  # 5 分钟
         # Footer 追踪: chat_id → (post_id, content)
         # runtime footer 不独立发帖，而是编辑上一条消息追加到末尾
         self._tracked_posts: Dict[str, Tuple[str, str]] = {}
@@ -1193,11 +1204,31 @@ class MattermostApprovalAdapter(MattermostAdapter):
         root_id instead. Using a reply's own ID as root_id causes
         "Invalid RootId parameter" errors.
 
+        Results are cached for 5 minutes to avoid repeated API calls
+        (especially important when WebSocket is unstable and API calls
+        frequently time out).
+
         Returns None when resolution fails (API error, network issue) —
         callers MUST skip root_id in that case to avoid 400 errors.
         """
         if not post_id:
             return None
+
+        # ── 缓存命中 ──
+        import time as _time
+        cached = self._root_id_cache.get(post_id)
+        if cached is not None:
+            cached_root, cached_ts = cached
+            if _time.monotonic() - cached_ts < self._root_id_cache_ttl:
+                logger.debug(
+                    "Mattermost: _resolve_root_id — cache hit for post=%s → %s",
+                    post_id, cached_root,
+                )
+                return cached_root
+            # 过期，清除
+            del self._root_id_cache[post_id]
+
+        # ── API 调用 ──
         try:
             data = await self._api_get(f"posts/{post_id}")
         except Exception:
@@ -1225,14 +1256,106 @@ class MattermostApprovalAdapter(MattermostAdapter):
                 "Mattermost: _resolve_root_id — input=%s root_id=%s (reply → use root)",
                 post_id, root_id,
             )
-            return root_id
+            result = root_id
+        else:
+            # root_id is "" or missing → this post IS the thread root.
+            logger.info(
+                "Mattermost: _resolve_root_id — input=%s is_root=True (root_id=%r)",
+                post_id, root_id,
+            )
+            result = post_id
 
-        # root_id is "" or missing → this post IS the thread root.
-        logger.info(
-            "Mattermost: _resolve_root_id — input=%s is_root=True (root_id=%r)",
-            post_id, root_id,
-        )
-        return post_id
+        # 写入缓存
+        self._root_id_cache[post_id] = (result, _time.monotonic())
+        # 清理过期条目（简单 LRU：每次解析后清理）
+        now = _time.monotonic()
+        expired = [
+            k for k, (_, ts) in self._root_id_cache.items()
+            if now - ts >= self._root_id_cache_ttl
+        ]
+        for k in expired:
+            del self._root_id_cache[k]
+
+        return result
+
+    # ══════════════════════════════════════════════════════════════════════
+    # edit_message() 覆写 — 修复上游 _api_put 缺少 timeout 的 Bug
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        finalize: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Edit an existing post — 覆写父类，添加 timeout 和空内容防护.
+
+        上游 bundled adapter 的 edit_message 调用 _api_put 时未设置 timeout，
+        而 _api_get/_api_post 都设置了 timeout=30s。当 WebSocket 不稳定导致
+        HTTP 连接池异常时，_api_put 会无限挂起或抛出 asyncio.TimeoutError
+        （其 str() 为空字符串，导致 gateway 日志中只显示 "Stream send/edit
+        error: " 而无有用信息）。
+        """
+        if not content or not content.strip():
+            logger.debug(
+                "Mattermost: edit_message skipped — empty content for post=%s",
+                message_id,
+            )
+            return SendResult(success=False, error="empty message")
+
+        formatted = self.format_message(content)
+        if not formatted or not formatted.strip():
+            logger.debug(
+                "Mattermost: edit_message skipped — empty after format_message for post=%s",
+                message_id,
+            )
+            return SendResult(success=False, error="empty message after formatting")
+
+        import aiohttp
+        url = f"{self._base_url}/api/v4/posts/{message_id}/patch"
+        try:
+            async with self._session.put(
+                url,
+                headers=self._headers(),
+                json={"message": formatted},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    logger.error(
+                        "MM API PUT posts/%s/patch → %s: %s",
+                        message_id, resp.status, body[:200],
+                    )
+                    return SendResult(
+                        success=False,
+                        error=f"HTTP {resp.status}: {body[:100]}",
+                    )
+                data = await resp.json()
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Mattermost: edit_message timeout (30s) for post=%s",
+                message_id,
+            )
+            return SendResult(success=False, error="edit timeout (30s)")
+        except aiohttp.ClientError as exc:
+            logger.error(
+                "MM API PUT posts/%s/patch network error: %s",
+                message_id, exc,
+            )
+            return SendResult(success=False, error=f"network error: {exc}")
+        except Exception as exc:
+            logger.error(
+                "MM API PUT posts/%s/patch unexpected error: %s",
+                message_id, exc, exc_info=True,
+            )
+            return SendResult(success=False, error=f"unexpected error: {exc}")
+
+        if not data or "id" not in data:
+            return SendResult(success=False, error="Failed to edit post")
+        return SendResult(success=True, message_id=data["id"])
 
     async def _get_thread_root_id(self, reply_to: Optional[str]) -> Optional[str]:
         """Resolve reply_to → thread root_id when in thread mode."""
@@ -1273,11 +1396,14 @@ class MattermostApprovalAdapter(MattermostAdapter):
                     footer_text = content.replace(" · ", " ")
                     footer_md = f"`── {footer_text} ──`"
                     edited = f"{current_text}\n\n{footer_md}"
-                    result = await self._api_put(f"posts/{post_id}", {
-                        "id": post_id,
-                        "message": edited,
-                    })
-                    if result and result.get("id"):
+                    # 使用覆写的 edit_message（带 timeout 和错误处理），
+                    # 而非直接调 _api_put（上游缺 timeout）。
+                    edit_result = await self.edit_message(
+                        chat_id=chat_id,
+                        message_id=post_id,
+                        content=edited,
+                    )
+                    if edit_result.success:
                         self._tracked_posts[chat_id] = (post_id, edited)
                         return SendResult(success=True, message_id=post_id)
                     logger.warning(
