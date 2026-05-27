@@ -8,30 +8,20 @@
 # 插件架构（Platform Plugin override）只能覆盖适配器方法，无法触及调用方代码。
 #
 # 为什么需要此脚本：
-#   这些问题修改的是 gateway/run.py 中的调用方代码，
-#   Hermes Platform Plugin 机制只能覆盖适配器方法，无法触及调用方。
+#   这些问题修改的是 gateway/run.py、stream_consumer.py、base.py 等
+#   调用方代码，Hermes Platform Plugin 机制只能覆盖适配器方法，无法触及调用方。
 #   详见插件 README。
 #
-# 问题 1 — DM 审批缺少 user_id 参数：
-#   run.py 调用 send_exec_approval() 时没有传入 user_id，
-#   导致插件无法知道将审批卡片发送给谁。
-#
-# ~~问题 2 — 工具进度消息不进 Thread~~
-#   Hermes v0.14.0 上游虽然加入了 Platform.MATTERMOST，但保留了
-#   source.thread_id 条件——当用户在 Channel 根级别发消息时
-#   source.thread_id 为 None，导致 _progress_reply_to 仍为 None，
-#   工具进度消息不进 Thread。需对 Mattermost 去掉 source.thread_id 限制。
-#
-# 问题 2 — Clarify 等待时 Session 分裂（AI 失忆）：
-#   _handle_message 用 _quick_key 查 pending clarify，但 _quick_key
-#   可能因 thread_sessions_per_user 配置差异不等于 clarify 注册时的
-#   session_key → 查不到 → 消息穿透 → 新 Session 创建 → 并行双会话。
-#   仅在线程上下文中触发（source.thread_id 守卫）。
-#
-# 问题 3 — Clarify 并发守护（兜底防御）：
-#   _handle_message_with_agent 在获得 canonical session_key 后、
-#   启动 agent 前，再次检查 clarify。当 P46（问题 2）因竞态漏网时，
-#   在最后一刻拦截消息并路由给等待中的 clarify，阻止新 Session 创建。
+# Patch 列表：
+#   P1. DM 审批传入 user_id（run.py）
+#   P2. 工具进度消息进 Thread（run.py）— 上游 v0.14.0 修复不完整
+#   P3. Clarify Session 分裂修复（run.py）
+#   P4. Clarify 并发守护（run.py）
+#   P5. 评论→正文合并，防止消息碎片化（stream_consumer.py）
+#   P6. WebSocket 心跳优化 30s→15s（adapter.py）
+#   P7. stream fallback 丢失 reply_to（stream_consumer.py）
+#   P8. _api_put 缺少 timeout（adapter.py）
+#   P9. 幽灵代码围栏修复（base.py）
 #
 # 使用方法：
 #   ./scripts/hermes-mattermost-enhancer.sh check   # 检查状态
@@ -83,7 +73,7 @@ _do_patch() {
     return $rc
 }
 
-# ── Patch 1: DM 审批传入 user_id ─────────────────────────────────────────
+# ── P1: DM 审批传入 user_id ─────────────────────────────────────────────
 
 patch_user_id() {
     _do_patch "gateway/run.py" \
@@ -121,7 +111,7 @@ else:
 PYEOF
 }
 
-# ── Patch 2: 工具进度消息进 Thread ──────────────────────────────────────
+# ── P2: 工具进度消息进 Thread ───────────────────────────────────────────
 
 patch_progress_thread() {
     _do_patch "gateway/run.py" \
@@ -157,7 +147,7 @@ else:
 PYEOF
 }
 
-# ── Patch 3: Clarify Session 分裂修复 ─────────────────────────────────────
+# ── P3: Clarify Session 分裂修复 ────────────────────────────────────────
 
 patch_clarify_session() {
     _do_patch "gateway/run.py" \
@@ -199,7 +189,7 @@ else:
 PYEOF
 }
 
-# ── Patch 4: Clarify 并发守护 ─────────────────────────────────────────────
+# ── P4: Clarify 并发守护 ────────────────────────────────────────────────
 
 patch_clarify_guard() {
     _do_patch "gateway/run.py" \
@@ -245,6 +235,184 @@ else:
 PYEOF
 }
 
+# ── P5: 评论→正文合并（防止消息碎片化） ─────────────────────────────────
+
+patch_commentary_merge() {
+    _do_patch "gateway/stream_consumer.py" \
+        "Fix: response fragmented into multiple messages（修复「回复碎成很多条消息」的问题）" \
+        'Accumulate commentary' <<'PYEOF'
+import sys
+file_path = sys.argv[1]
+with open(file_path, "r") as f:
+    content = f.read()
+
+old = """                if commentary_text is not None:
+                    self._reset_segment_state()
+                    await self._send_commentary(commentary_text)
+                    self._last_edit_time = time.monotonic()
+                    self._reset_segment_state()"""
+
+new = """                if commentary_text is not None:
+                    # Accumulate commentary into the stream buffer instead of
+                    # sending as a separate message.  Prevents response fragmentation
+                    # across multiple messages on platforms like Mattermost.
+                    if self._accumulated:
+                        self._accumulated += "\\n\\n"
+                    self._accumulated += commentary_text"""
+
+if old in content:
+    content = content.replace(old, new)
+    with open(file_path, "w") as f:
+        f.write(content)
+    print("APPLIED")
+else:
+    print("SKIP")
+PYEOF
+}
+
+# ── P6: WebSocket 心跳优化 30s→15s ──────────────────────────────────────
+
+patch_ws_heartbeat() {
+    _do_patch "plugins/platforms/mattermost/adapter.py" \
+        "Fix: WebSocket disconnects every ~50s close 258（修复「WebSocket每50秒断开重连」的问题）" \
+        'heartbeat=15.0' <<'PYEOF'
+import sys
+file_path = sys.argv[1]
+with open(file_path, "r") as f:
+    content = f.read()
+
+old = "self._ws = await self._session.ws_connect(ws_url, heartbeat=30.0)"
+new = "self._ws = await self._session.ws_connect(ws_url, heartbeat=15.0)"
+
+if old in content:
+    content = content.replace(old, new)
+    with open(file_path, "w") as f:
+        f.write(content)
+    print("APPLIED")
+else:
+    print("SKIP")
+PYEOF
+}
+
+# ── P7: stream fallback 丢失 reply_to ───────────────────────────────────
+
+patch_stream_fallback_reply_to() {
+    _do_patch "gateway/stream_consumer.py" \
+        "Fix: thread replies lost on fallback send（修复「Thread回复在stream fallback时丢失」的问题）" \
+        'reply_to=self._initial_reply_to_id' <<'PYEOF'
+import sys
+file_path = sys.argv[1]
+with open(file_path, "r") as f:
+    content = f.read()
+
+old = """                result = await self.adapter.send(
+                    chat_id=self.chat_id,
+                    content=chunk,
+                    metadata=self.metadata,
+                )"""
+
+new = """                result = await self.adapter.send(
+                    chat_id=self.chat_id,
+                    content=chunk,
+                    reply_to=self._initial_reply_to_id,
+                    metadata=self.metadata,
+                )"""
+
+if old in content:
+    content = content.replace(old, new)
+    with open(file_path, "w") as f:
+        f.write(content)
+    print("APPLIED")
+else:
+    print("SKIP")
+PYEOF
+}
+
+# ── P8: Mattermost _api_put 缺少 timeout ───────────────────────────────
+
+patch_api_put_timeout() {
+    _do_patch "plugins/platforms/mattermost/adapter.py" \
+        "Fix: message edit hangs silently（修复「消息编辑超时无错误信息」的问题）" \
+        'timeout=aiohttp.ClientTimeout(total=30)' <<'PYEOF'
+import sys
+file_path = sys.argv[1]
+with open(file_path, "r") as f:
+    content = f.read()
+
+old = """            async with self._session.put(
+                url, headers=self._headers(), json=payload
+            ) as resp:"""
+
+new = """            async with self._session.put(
+                url, headers=self._headers(), json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:"""
+
+if old in content:
+    content = content.replace(old, new)
+    with open(file_path, "w") as f:
+        f.write(content)
+    print("APPLIED")
+else:
+    print("SKIP")
+PYEOF
+}
+
+# ── P9: 幽灵代码围栏修复 ────────────────────────────────────────────────
+
+patch_ghost_fence() {
+    _do_patch "gateway/platforms/base.py" \
+        "Fix: ghost empty code blocks in long responses（修复「长代码块出现幽灵空代码围栏」的问题）" \
+        'reopening the fence would create' <<'PYEOF'
+import sys
+file_path = sys.argv[1]
+with open(file_path, "r") as f:
+    content = f.read()
+
+old = """        while remaining:
+            # If we're continuing a code block from the previous chunk,
+            # prepend a new opening fence with the same language tag.
+            prefix = f\"```{carry_lang}\\n\" if carry_lang is not None else \"\""""
+
+new = """        while remaining:
+            # When the previous chunk's closing fence is immediately followed
+            # by the original content's own closing `` ``` `` (because the
+            # split cut right before it), reopening the fence would create a
+            # ghost empty block::
+            #
+            #     ```python
+            #     ```
+            #
+            # Detect this and consume the original closing fence without
+            # reopening, so the code block ends cleanly at the chunk boundary.
+            if carry_lang is not None:
+                stripped_line = remaining.lstrip().split("\\n", 1)[0].rstrip()
+                if stripped_line.startswith("```") and not stripped_line[3:].strip():
+                    # The first meaningful line is a bare `` ``` `` — the
+                    # original closing fence.  Consume it and clear the
+                    # carry so we don't reopen.
+                    idx = remaining.index("```")
+                    remaining = remaining[idx + 3:]
+                    if remaining.startswith("\\n"):
+                        remaining = remaining[1:]
+                    remaining = remaining.lstrip()
+                    carry_lang = None
+                    continue
+
+            # If we're continuing a code block from the previous chunk,
+            # prepend a new opening fence with the same language tag.
+            prefix = f\"```{carry_lang}\\n\" if carry_lang is not None else \"\""""
+
+if old in content:
+    content = content.replace(old, new)
+    with open(file_path, "w") as f:
+        f.write(content)
+    print("APPLIED")
+else:
+    print("SKIP")
+PYEOF
+}
+
 # ── 状态检查 ──────────────────────────────────────────────────────────────
 
 check_status() {
@@ -255,8 +423,9 @@ check_status() {
     echo "═══════════════════════════════════════════════════"
     echo ""
 
-    local ok_count=0 total=4
+    local ok_count=0 total=9
 
+    # ── P1 ──
     echo "  ── Check ①: Can approval cards reach your DMs? ──"
     echo "     （审批卡片能不能发到你的私信）"
     echo ""
@@ -267,6 +436,7 @@ check_status() {
         warn "Approval cards may not arrive ⚠️ (Hermes doesn't know who to DM)（审批卡片可能收不到 — Hermes 不知道该私信谁）"
     fi
 
+    # ── P2 ──
     echo ""
     echo "  ── Check ②: Do tool progress messages stay inside the Thread? ──"
     echo "     （工具调用进度消息是否在 Thread 内显示）"
@@ -278,6 +448,7 @@ check_status() {
         warn "Progress may leak to channel ⚠️ (tool calls appear outside thread)（进度可能泄露到频道 — 工具调用跑到 Thread 外面了）"
     fi
 
+    # ── P3 ──
     echo ""
     echo "  ── Check ③: Will the AI forget what you were talking about? ──"
     echo "     （AI 会不会突然忘记刚才在聊什么——Clarify 等待时失忆）"
@@ -289,6 +460,7 @@ check_status() {
         warn "AI may forget context ⚠️ (new session created while waiting for clarify reply)（AI 可能失忆 — 等待 Clarify 回复时可能创建新会话）"
     fi
 
+    # ── P4 ──
     echo ""
     echo "  ── Check ④: Is there a failsafe against duplicate sessions? ──"
     echo "     （有没有兜底防护防止并发创建重复会话）"
@@ -298,6 +470,66 @@ check_status() {
         ok_count=$((ok_count + 1))
     else
         warn "No failsafe ⚠️ (rare race condition could still split sessions)（缺少兜底防护 — 极端情况下仍可能分裂会话）"
+    fi
+
+    # ── P5 ──
+    echo ""
+    echo "  ── Check ⑤: Are responses fragmented into multiple messages? ──"
+    echo "     （回复会不会碎成很多条消息）"
+    echo ""
+    if grep -q 'Accumulate commentary' "${AGENT_DIR}/gateway/stream_consumer.py" 2>/dev/null; then
+        ok "No fragmentation ✅ (commentary merged into stream)（不会碎片化 — 评论合并到正文流中）"
+        ok_count=$((ok_count + 1))
+    else
+        warn "Responses may fragment ⚠️ (commentary sent as separate messages)（回复可能碎片化 — 评论作为独立消息发送）"
+    fi
+
+    # ── P6 ──
+    echo ""
+    echo "  ── Check ⑥: Is the WebSocket connection stable? ──"
+    echo "     （WebSocket 连接是否稳定）"
+    echo ""
+    if grep -q 'heartbeat=15.0' "${AGENT_DIR}/plugins/platforms/mattermost/adapter.py" 2>/dev/null; then
+        ok "WebSocket stable ✅ (heartbeat=15s, no more 258 disconnects)（连接稳定 — 心跳15秒，不再断连）"
+        ok_count=$((ok_count + 1))
+    else
+        warn "WebSocket may disconnect ⚠️ (heartbeat=30s, closes every ~50s with code 258)（可能断连 — 心跳30秒，每50秒断一次）"
+    fi
+
+    # ── P7 ──
+    echo ""
+    echo "  ── Check ⑦: Do fallback sends preserve Thread routing? ──"
+    echo "     （fallback 发送是否保持 Thread 路由）"
+    echo ""
+    if grep -q 'reply_to=self._initial_reply_to_id' "${AGENT_DIR}/gateway/stream_consumer.py" 2>/dev/null; then
+        ok "Thread routing OK ✅ (fallback sends include reply_to)（Thread 路由正常 — fallback 发送包含 reply_to）"
+        ok_count=$((ok_count + 1))
+    else
+        warn "Thread routing broken ⚠️ (fallback sends missing reply_to, replies leak to channel)（Thread 路由丢失 — fallback 发送缺少 reply_to，回复跑到频道根级别）"
+    fi
+
+    # ── P8 ──
+    echo ""
+    echo "  ── Check ⑧: Does message edit have proper timeout? ──"
+    echo "     （消息编辑是否有超时设置）"
+    echo ""
+    if grep -q 'timeout=aiohttp.ClientTimeout(total=30)' "${AGENT_DIR}/plugins/platforms/mattermost/adapter.py" 2>/dev/null; then
+        ok "Edit timeout OK ✅ (30s timeout on _api_put)（编辑超时正常 — _api_put 有 30 秒超时）"
+        ok_count=$((ok_count + 1))
+    else
+        warn "Edit may hang ⚠️ (_api_put has no timeout, silent failure on network issues)（编辑可能卡住 — _api_put 无超时，网络问题导致静默失败）"
+    fi
+
+    # ── P9 ──
+    echo ""
+    echo "  ── Check ⑨: Any ghost empty code blocks? ──"
+    echo "     （长代码块有没有幽灵空代码围栏）"
+    echo ""
+    if grep -q 'reopening the fence would create' "${AGENT_DIR}/gateway/platforms/base.py" 2>/dev/null; then
+        ok "No ghost fences ✅ (truncate_message handles chunk boundaries correctly)（没有幽灵围栏 — 长代码块分片边界处理正确）"
+        ok_count=$((ok_count + 1))
+    else
+        warn "Ghost fences possible ⚠️ (empty code blocks appear in long code responses)（可能有幽灵围栏 — 长代码回复中出现空代码块）"
     fi
 
     echo ""
@@ -337,6 +569,11 @@ apply_all() {
     patch_progress_thread
     patch_clarify_session
     patch_clarify_guard
+    patch_commentary_merge
+    patch_ws_heartbeat
+    patch_stream_fallback_reply_to
+    patch_api_put_timeout
+    patch_ghost_fence
     echo ""
     ok "Fixes applied!（修复完成！）"
     echo ""
