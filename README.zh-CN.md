@@ -14,7 +14,7 @@
 
 **一句话：** 如果你在 Mattermost 里用 Hermes，这个插件能让它变得更好用。
 
-Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮你干活。但原版 Hermes 在某些方面不太顺手——比如执行危险命令前不会问你、Thread 里回复有时候跳到频道里去了、想切换 AI 模型得去改配置文件……
+Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮你干活。但原版 Hermes 在某些方面不太顺手——比如执行危险命令前不会问你、想切换 AI 模型得去改配置文件、WebSocket 动不动就断连……
 
 这个插件就是给 Hermes "加装"这些能力，让你用起来更顺手。
 
@@ -167,6 +167,8 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 > 💡 **Bug #11** 由主脚本 `hermes-patches.sh` 修复（P50 评论合并），不是本插件的配套脚本。详见 `~/.hermes/scripts/hermes-patches.sh`。
 >
+> 💡 批量图片（`send_multiple_images`）的 Thread 路由由配套脚本 **P6** 修复（shell patch on bundled adapter），与 Bug #5（Adapter 覆写单文件媒体路由）互补。
+>
 > 💡 还有两个额外的上游 Bug 也通过主脚本修复：长代码块出现幽灵空围栏（P53）、流式 fallback 消息不进 Thread（P55）。虽然不常见，但都包含在同一个 `hermes-patches.sh` 中。
 
 ---
@@ -201,7 +203,7 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 修那些插件够不到的 Bug。分两个脚本：
 
-- **配套脚本**（`scripts/hermes-mattermost-enhancer.sh`）：Mattermost 交互专属的 Gateway 层修复 — DM 审批路由 (P1)、工具进度进 Thread (P2)、clarify 会话处理 (P3/P4)、auto-resume 去重 (P5)
+- **配套脚本**（`scripts/hermes-mattermost-enhancer.sh`）：Mattermost 交互专属的 Gateway 层修复 — DM 审批路由 (P1)、工具进度进 Thread (P2)、clarify 会话处理 (P3/P4)、auto-resume 去重 (P5)、批量图片 Thread 路由 (P6)
 - **主脚本**（`~/.hermes/scripts/hermes-patches.sh`）：平台无关的通用 Gateway 修复 — 评论合并 (P50)、幽灵代码围栏 (P53)、fallback 消息 Thread 路由 (P55)，以及 CLI 层修复（自定义 provider、模型白名单、cron 编码）
 
 > ⚠️ **当前状态：** 这些补丁目前以本地修复方式维护。部分已提交上游但尚未合入 Hermes 官方版本。建议每次升级 Hermes 后运行 `check` 确认状态——一旦上游合入，脚本会报告"已应用"。
@@ -384,13 +386,14 @@ A: 不会。它只做了最小改动，你可以用 `check` 随时查看状态�
 
 **Q: 我不想装脚本，有什么影响？**
 
-A: 几个 Bug 得不到修复（上面标注「Shell Patch」的 #6-11）：
+A: 以下 Bug 得不到修复（上面标注「Shell Patch」的 #6-11 以及 P6）：
 - DM 审批卡片收不到（因为没有你的 user_id）
 - 工具进度消息不会出现在 Thread 里（会跳到频道主聊天流）
 - Clarify 会话分裂：新的消息可能被当成新对话（AI 失忆）
 - Clarify 期间可能创建重复会话
 - Gateway 重启后同频道多 Thread session 互相串台
 - 回复碎片化：AI 回复被拆成多条独立消息
+- 批量图片不进 Thread（`send_multiple_images` 图片落到频道主聊天流）
 
 其他功能（Adapter 覆写的 #1-5）都正常工作。
 

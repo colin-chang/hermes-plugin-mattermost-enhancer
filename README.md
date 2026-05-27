@@ -14,7 +14,7 @@ Makes your Hermes AI assistant smarter, safer, and easier to use inside Mattermo
 
 **In one sentence:** If you use Hermes in Mattermost, this plugin makes everything work better.
 
-Hermes is an AI assistant you chat with in Mattermost to get things done. But the vanilla Hermes has some rough edges — it runs dangerous commands without asking, Thread replies sometimes leak into the channel, switching AI models requires editing config files…
+Hermes is an AI assistant you chat with in Mattermost to get things done. But the vanilla Hermes has some rough edges — it runs dangerous commands without asking, switching AI models requires editing config files, the WebSocket keeps disconnecting…
 
 This plugin "retrofits" these capabilities onto Hermes so everything just feels right.
 
@@ -56,6 +56,14 @@ Click any button and it takes effect immediately — all within Mattermost, no w
 The dropdown lists all your available models. Pick one — this Thread immediately switches to the new model, **other Threads are unaffected**.
 
 Thread A uses Model X for coding; Thread B uses Model Y for chatting. No interference.
+
+> 💡 **Tip: Channel → Thread Model Inheritance**
+>
+> If you first run `/model` in the **channel's main timeline** to pick a model, then hit Reply to create a new Thread, that Thread will **automatically inherit** your chosen model — no need to switch again.
+>
+> Example: you type `/model` in `#dev` channel and select `deepseek-v4-pro`, then reply to any message (creating a Thread). That new Thread automatically uses `deepseek-v4-pro`.
+>
+> **Doesn't affect existing Threads** — if a Thread already uses a different model, inheritance won't overwrite it. Each Thread can still independently `/model` back to any model.
 
 ---
 
@@ -159,6 +167,8 @@ Below are 11 bugs fixed by this project (plugin + companion shell script). Each 
 
 > 💡 **Bug #11** is fixed by the main `hermes-patches.sh` script (P50 commentary merge), not this plugin's companion script. See the main script in `~/.hermes/scripts/hermes-patches.sh`.
 >
+> 💡 Batch image (`send_multiple_images`) Thread routing is fixed by companion script **P6** (shell patch on bundled adapter), complementing Bug #5 (adapter override for single-file media).
+>
 > 💡 There are also two additional upstream bugs fixed via the main script: ghost empty code fences in long code blocks (P53), and stream fallback messages not routed to Threads (P55). These are uncommon but included in the same `hermes-patches.sh`.
 
 ---
@@ -193,7 +203,7 @@ Bugs marked **Shell Patch** in the table above (#6-10) are exactly in that untou
 
 It fixes those plugin-unreachable bugs by modifying Hermes' source files with minimal changes:
 
-- **Companion script** (`scripts/hermes-mattermost-enhancer.sh`): Gateway-level patches specific to Mattermost interaction — DM approval routing (P1), tool progress in Thread (P2), clarify session handling (P3/P4), auto-resume dedup (P5)
+- **Companion script** (`scripts/hermes-mattermost-enhancer.sh`): Gateway-level patches specific to Mattermost interaction — DM approval routing (P1), tool progress in Thread (P2), clarify session handling (P3/P4), auto-resume dedup (P5), batch image Thread routing (P6)
 - **Main script** (`~/.hermes/scripts/hermes-patches.sh`): Platform-agnostic Gateway fixes — commentary merge (P50), ghost code fences (P53), stream fallback reply routing (P55), plus CLI-level fixes (custom provider, model whitelist, cron encoding)
 
 > ⚠️ **Status:** These patches are maintained as local fixes. Some have been submitted upstream but are not yet merged into official Hermes releases. Running `check` after each Hermes upgrade is recommended — once upstream merges them, the scripts will report "already applied" and you can skip them.
@@ -358,7 +368,7 @@ Want to turn it off? Set `display.runtime_footer.enabled` to `false` in `config.
 
 ## ❓ FAQ
 
-**Q: Do I need to install both the plugin and the scripts?**
+**Q: Do I need to install the plugin and both scripts?**
 
 A: Yes. The plugin is the "feature pack"; the scripts are the "bug-fix packs". You need all three components. Scripts only need to run once (`apply`), though you may need to re-run after upgrading Hermes.
 
@@ -376,13 +386,14 @@ A: No. They make minimal changes. You can check status anytime with `check`. To 
 
 **Q: What if I skip the scripts?**
 
-A: Several bugs remain unfixed (those marked "Shell Patch" above: #6-11):
+A: Several bugs remain unfixed (those marked "Shell Patch" above: #6-11, plus P6):
 - DM approval cards may not arrive (no user_id passed)
 - Tool progress messages appear in the main channel, not in Threads
 - Clarify session split: new messages during clarify waiting create separate sessions (AI forgets everything)
 - Duplicate sessions may spawn during clarify waiting
 - After Gateway restart, auto-resumed sessions in the same channel can leak between Threads
 - AI replies may be fragmented into multiple separate messages
+- Batch images won't route to Threads (`send_multiple_images` lands in main channel)
 
 All adapter-override fixes (#1-5) work normally without the scripts.
 
