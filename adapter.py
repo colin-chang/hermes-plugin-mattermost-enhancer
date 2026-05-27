@@ -1171,6 +1171,60 @@ class MattermostApprovalAdapter(MattermostAdapter):
     # 生命周期覆写（启动/停止回调服务器）
     # ══════════════════════════════════════════════════════════════════════
 
+    # ══════════════════════════════════════════════════════════════════════
+    # WebSocket 覆写 — 心跳优化 30s→15s（替代 P6 shell patch）
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def _ws_connect_and_listen(self) -> None:
+        """Override: use heartbeat=15s instead of upstream's 30s.
+
+        Mattermost server's idle timeout is ~50s; with heartbeat=30s the
+        first ping may arrive *after* the server closes the connection
+        (code 258).  15s keeps the connection alive without patching
+        gateway source code.
+        """
+        import re as _re
+        import json as _json
+
+        ws_url = _re.sub(r"^http", "ws", self._base_url) + "/api/v4/websocket"
+        logger.info("Mattermost: connecting to %s (heartbeat=15s)", ws_url)
+
+        import aiohttp
+        self._ws = await self._session.ws_connect(
+            ws_url, heartbeat=15.0,
+        )
+
+        # Authenticate via the WebSocket.
+        auth_msg = {
+            "seq": 1,
+            "action": "authentication_challenge",
+            "data": {"token": self._token},
+        }
+        await self._ws.send_json(auth_msg)
+        logger.info("Mattermost: WebSocket connected and authenticated (heartbeat=15s)")
+
+        async for raw_msg in self._ws:
+            if self._closing:
+                return
+
+            if raw_msg.type in {
+                raw_msg.type.TEXT,
+                raw_msg.type.BINARY,
+            }:
+                try:
+                    event = _json.loads(raw_msg.data)
+                except (_json.JSONDecodeError, TypeError):
+                    continue
+                await self._handle_ws_event(event)
+            elif raw_msg.type in {
+                raw_msg.type.ERROR,
+                raw_msg.type.CLOSE,
+                raw_msg.type.CLOSING,
+                raw_msg.type.CLOSED,
+            }:
+                logger.info("Mattermost: WebSocket closed (%s)", raw_msg.type)
+                break
+
     async def connect(self) -> bool:
         """Connect to Mattermost — 覆写父类，追加回调服务器启动."""
         import asyncio

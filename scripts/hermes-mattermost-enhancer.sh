@@ -4,24 +4,25 @@
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # 此脚本为 hermes-plugin-mattermost-enhancer 插件的配套补丁。
-# 修复 Hermes Agent 上游代码中影响 Mattermost 用户体验的 Gateway 缺陷——
-# 插件架构（Platform Plugin override）只能覆盖适配器方法，无法触及调用方代码。
+# 修复 Hermes Agent 上游代码中影响 Mattermost 用户体验的 Gateway 缺陷。
 #
 # 为什么需要此脚本：
 #   这些问题修改的是 gateway/run.py、stream_consumer.py、base.py 等
 #   调用方代码，Hermes Platform Plugin 机制只能覆盖适配器方法，无法触及调用方。
 #   详见插件 README。
 #
+# 已在插件 adapter 中实现的修复（不需要 shell patch）：
+#   ✅ WebSocket 心跳 30s→15s — 覆写 _ws_connect_and_listen()
+#   ✅ _api_put 缺少 timeout — 覆写 edit_message() 自实现 HTTP PUT
+#
 # Patch 列表：
-#   P1. DM 审批传入 user_id（run.py）
+#   P1. DM 审批传入 user_id（run.py）— 可选，插件已有降级方案
 #   P2. 工具进度消息进 Thread（run.py）— 上游 v0.14.0 修复不完整
 #   P3. Clarify Session 分裂修复（run.py）
 #   P4. Clarify 并发守护（run.py）
 #   P5. 评论→正文合并，防止消息碎片化（stream_consumer.py）
-#   P6. WebSocket 心跳优化 30s→15s（adapter.py）
-#   P7. stream fallback 丢失 reply_to（stream_consumer.py）
-#   P8. _api_put 缺少 timeout（adapter.py）
-#   P9. 幽灵代码围栏修复（base.py）
+#   P6. stream fallback 丢失 reply_to（stream_consumer.py）
+#   P7. 幽灵代码围栏修复（base.py）
 #
 # 使用方法：
 #   ./scripts/hermes-mattermost-enhancer.sh check   # 检查状态
@@ -40,12 +41,14 @@ AGENT_DIR="${HOME}/.hermes/hermes-agent"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-ok()   { echo -e "${GREEN}[OK]${NC}    $1"; }
-warn() { echo -e "${RED}[FAIL]${NC}  $1"; }
-info() { echo -e "${CYAN}[INFO]${NC}  $1"; }
+ok()      { echo -e "${GREEN}[OK]${NC}    $1"; }
+warn()    { echo -e "${RED}[FAIL]${NC}  $1"; }
+optional(){ echo -e "${YELLOW}[OPT]${NC}    $1"; }
+info()    { echo -e "${CYAN}[INFO]${NC}  $1"; }
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────────
 
@@ -73,7 +76,7 @@ _do_patch() {
     return $rc
 }
 
-# ── P1: DM 审批传入 user_id ─────────────────────────────────────────────
+# ── P1: DM 审批传入 user_id（可选 — 插件已有 _get_user_id_from_channel 降级） ──
 
 patch_user_id() {
     _do_patch "gateway/run.py" \
@@ -270,31 +273,7 @@ else:
 PYEOF
 }
 
-# ── P6: WebSocket 心跳优化 30s→15s ──────────────────────────────────────
-
-patch_ws_heartbeat() {
-    _do_patch "plugins/platforms/mattermost/adapter.py" \
-        "Fix: WebSocket disconnects every ~50s close 258（修复「WebSocket每50秒断开重连」的问题）" \
-        'heartbeat=15.0' <<'PYEOF'
-import sys
-file_path = sys.argv[1]
-with open(file_path, "r") as f:
-    content = f.read()
-
-old = "self._ws = await self._session.ws_connect(ws_url, heartbeat=30.0)"
-new = "self._ws = await self._session.ws_connect(ws_url, heartbeat=15.0)"
-
-if old in content:
-    content = content.replace(old, new)
-    with open(file_path, "w") as f:
-        f.write(content)
-    print("APPLIED")
-else:
-    print("SKIP")
-PYEOF
-}
-
-# ── P7: stream fallback 丢失 reply_to ───────────────────────────────────
+# ── P6: stream fallback 丢失 reply_to ───────────────────────────────────
 
 patch_stream_fallback_reply_to() {
     _do_patch "gateway/stream_consumer.py" \
@@ -328,37 +307,7 @@ else:
 PYEOF
 }
 
-# ── P8: Mattermost _api_put 缺少 timeout ───────────────────────────────
-
-patch_api_put_timeout() {
-    _do_patch "plugins/platforms/mattermost/adapter.py" \
-        "Fix: message edit hangs silently（修复「消息编辑超时无错误信息」的问题）" \
-        'timeout=aiohttp.ClientTimeout(total=30)' <<'PYEOF'
-import sys
-file_path = sys.argv[1]
-with open(file_path, "r") as f:
-    content = f.read()
-
-old = """            async with self._session.put(
-                url, headers=self._headers(), json=payload
-            ) as resp:"""
-
-new = """            async with self._session.put(
-                url, headers=self._headers(), json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:"""
-
-if old in content:
-    content = content.replace(old, new)
-    with open(file_path, "w") as f:
-        f.write(content)
-    print("APPLIED")
-else:
-    print("SKIP")
-PYEOF
-}
-
-# ── P9: 幽灵代码围栏修复 ────────────────────────────────────────────────
+# ── P7: 幽灵代码围栏修复 ────────────────────────────────────────────────
 
 patch_ghost_fence() {
     _do_patch "gateway/platforms/base.py" \
@@ -423,17 +372,18 @@ check_status() {
     echo "═══════════════════════════════════════════════════"
     echo ""
 
-    local ok_count=0 total=9
+    local ok_count=0 total=7 opt_count=0
 
-    # ── P1 ──
-    echo "  ── Check ①: Can approval cards reach your DMs? ──"
-    echo "     （审批卡片能不能发到你的私信）"
+    # ── P1（可选）──
+    echo "  ── Check ①: Can approval cards reach your DMs? [OPTIONAL] ──"
+    echo "     （审批卡片能不能发到你的私信 — 可选优化）"
     echo ""
     if grep -q 'user_id=source.user_id' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
-        ok "Approval cards work ✅ (Hermes knows who to DM)（审批卡片能正常发送 — Hermes 知道发给谁）"
+        optional "Approval card optimization ✅ (Hermes passes user_id directly, saves 1 API call)（审批优化 — Hermes 直接传 user_id，省一次请求）"
         ok_count=$((ok_count + 1))
     else
-        warn "Approval cards may not arrive ⚠️ (Hermes doesn't know who to DM)（审批卡片可能收不到 — Hermes 不知道该私信谁）"
+        optional "Approval card fallback ⚠️ (adapter queries channel members — works but extra API call)（审批降级 — adapter 查 channel members，可用但多一次请求）"
+        optional "  → Apply P1 patch to optimize: $0 apply（应用 P1 可优化）"
     fi
 
     # ── P2 ──
@@ -486,19 +436,7 @@ check_status() {
 
     # ── P6 ──
     echo ""
-    echo "  ── Check ⑥: Is the WebSocket connection stable? ──"
-    echo "     （WebSocket 连接是否稳定）"
-    echo ""
-    if grep -q 'heartbeat=15.0' "${AGENT_DIR}/plugins/platforms/mattermost/adapter.py" 2>/dev/null; then
-        ok "WebSocket stable ✅ (heartbeat=15s, no more 258 disconnects)（连接稳定 — 心跳15秒，不再断连）"
-        ok_count=$((ok_count + 1))
-    else
-        warn "WebSocket may disconnect ⚠️ (heartbeat=30s, closes every ~50s with code 258)（可能断连 — 心跳30秒，每50秒断一次）"
-    fi
-
-    # ── P7 ──
-    echo ""
-    echo "  ── Check ⑦: Do fallback sends preserve Thread routing? ──"
+    echo "  ── Check ⑥: Do fallback sends preserve Thread routing? ──"
     echo "     （fallback 发送是否保持 Thread 路由）"
     echo ""
     if grep -q 'reply_to=self._initial_reply_to_id' "${AGENT_DIR}/gateway/stream_consumer.py" 2>/dev/null; then
@@ -508,21 +446,9 @@ check_status() {
         warn "Thread routing broken ⚠️ (fallback sends missing reply_to, replies leak to channel)（Thread 路由丢失 — fallback 发送缺少 reply_to，回复跑到频道根级别）"
     fi
 
-    # ── P8 ──
+    # ── P7 ──
     echo ""
-    echo "  ── Check ⑧: Does message edit have proper timeout? ──"
-    echo "     （消息编辑是否有超时设置）"
-    echo ""
-    if grep -q 'timeout=aiohttp.ClientTimeout(total=30)' "${AGENT_DIR}/plugins/platforms/mattermost/adapter.py" 2>/dev/null; then
-        ok "Edit timeout OK ✅ (30s timeout on _api_put)（编辑超时正常 — _api_put 有 30 秒超时）"
-        ok_count=$((ok_count + 1))
-    else
-        warn "Edit may hang ⚠️ (_api_put has no timeout, silent failure on network issues)（编辑可能卡住 — _api_put 无超时，网络问题导致静默失败）"
-    fi
-
-    # ── P9 ──
-    echo ""
-    echo "  ── Check ⑨: Any ghost empty code blocks? ──"
+    echo "  ── Check ⑦: Any ghost empty code blocks? ──"
     echo "     （长代码块有没有幽灵空代码围栏）"
     echo ""
     if grep -q 'reopening the fence would create' "${AGENT_DIR}/gateway/platforms/base.py" 2>/dev/null; then
@@ -532,18 +458,27 @@ check_status() {
         warn "Ghost fences possible ⚠️ (empty code blocks appear in long code responses)（可能有幽灵围栏 — 长代码回复中出现空代码块）"
     fi
 
+    # ── 插件内部实现的检查（始终生效，无需 patch） ──
+    echo ""
+    echo "  ── Built-in checks (always active, no patch needed): ──"
+    echo "     （内置检查 — 始终生效，无需 patch）"
+    echo ""
+    ok "WebSocket heartbeat 15s ✅ (adapter._ws_connect_and_listen override)（WebSocket 心跳 15 秒 — adapter 覆写）"
+    ok "Edit message timeout 30s ✅ (adapter.edit_message override)（编辑消息 30 秒超时 — adapter 覆写）"
+
     echo ""
     echo "───────────────────────────────────────────────────"
-    echo "  Result: ${ok_count}/${total} passed（检查结果：${ok_count}/${total} 项通过）"
+    echo "  Shell patches: ${ok_count}/${total} required + ${opt_count} optional"
+    echo "  （Shell 补丁：${ok_count}/${total} 必需 + ${opt_count} 可选）"
     echo "───────────────────────────────────────────────────"
     echo ""
 
     if [[ $ok_count -eq $total ]]; then
-        ok "All good, every fix is working ✨（一切正常，所有修复都已生效）"
+        ok "All required patches applied ✨（所有必需补丁已生效）"
     elif [[ $ok_count -eq 0 ]]; then
-        warn "No fixes applied yet, run: $0 apply（还没有安装任何修复，建议运行：$0 apply）"
+        warn "No patches applied yet, run: $0 apply（还没有安装任何补丁，建议运行：$0 apply）"
     else
-        warn "Some fixes still missing (${ok_count}/${total}), run: $0 apply（还有修复没装完 ${ok_count}/${total}，建议运行：$0 apply）"
+        warn "Some required patches still missing (${ok_count}/${total}), run: $0 apply（还有必需补丁没装完 ${ok_count}/${total}，建议运行：$0 apply）"
     fi
 }
 
@@ -553,7 +488,7 @@ restart_gateway() {
     echo ""
     info "Restarting Hermes...（正在重启 Hermes）"
     if hermes gateway restart 2>&1; then
-        ok "Restarted ✅ — fixes are now active!（已重启 — 修复生效了！）"
+        ok "Restarted ✅ — patches are now active!（已重启 — 补丁生效了！）"
     else
         warn "Restart failed, manually run: hermes gateway restart（重启失败，请手动执行：hermes gateway restart）"
     fi
@@ -570,17 +505,15 @@ apply_all() {
     patch_clarify_session
     patch_clarify_guard
     patch_commentary_merge
-    patch_ws_heartbeat
     patch_stream_fallback_reply_to
-    patch_api_put_timeout
     patch_ghost_fence
     echo ""
-    ok "Fixes applied!（修复完成！）"
+    ok "Patches applied!（补丁完成！）"
     echo ""
 
     # 交互式重启询问
     echo "───────────────────────────────────────────────────"
-    echo -n "Restart required for fixes to take effect. Restart now? [Y/n]（需要重启才能生效，是否现在重启？） "
+    echo -n "Restart required for patches to take effect. Restart now? [Y/n]（需要重启才能生效，是否现在重启？） "
     read -r REPLY
     echo ""
 
@@ -589,7 +522,7 @@ apply_all() {
             restart_gateway
             ;;
         *)
-            warn "Skipped. Fixes are installed but require a restart.（已跳过 — 修复已安装，重启后生效）"
+            warn "Skipped. Patches are installed but require a restart.（已跳过 — 补丁已安装，重启后生效）"
             warn "Manually restart later: hermes gateway restart（稍后手动执行：hermes gateway restart）"
             echo ""
             ;;
@@ -612,8 +545,8 @@ case "$CMD" in
     *)
         echo "Usage: $0 {apply|check|status}（用法）"
         echo ""
-        echo "  check   — Check if all fixes are applied (default)（检查所有修复是否生效，默认）"
-        echo "  apply   — Apply fixes, then ask whether to restart（安装所有修复，完成后询问是否重启）"
+        echo "  check   — Check if all patches are applied (default)（检查所有补丁是否生效，默认）"
+        echo "  apply   — Apply patches, then ask whether to restart（安装所有补丁，完成后询问是否重启）"
         echo "  status  — Same as check（同 check）"
         ;;
 esac
