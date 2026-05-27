@@ -16,19 +16,18 @@
 #   run.py 调用 send_exec_approval() 时没有传入 user_id，
 #   导致插件无法知道将审批卡片发送给谁。
 #
-# 问题 2 — 工具进度消息不进 Thread：
-#   run.py 的 _progress_reply_to 条件判断只检查了 Platform.FEISHU，
-#   遗漏了 Platform.MATTERMOST，导致工具链进度回退到频道主会话流。
+# ~~问题 2 — 工具进度消息不进 Thread~~
+#   Hermes v0.14.0 上游已修复，patch 已移除。
 #
-# 问题 3 — Clarify 等待时 Session 分裂（AI 失忆）：
+# 问题 2 — Clarify 等待时 Session 分裂（AI 失忆）：
 #   _handle_message 用 _quick_key 查 pending clarify，但 _quick_key
 #   可能因 thread_sessions_per_user 配置差异不等于 clarify 注册时的
 #   session_key → 查不到 → 消息穿透 → 新 Session 创建 → 并行双会话。
 #   仅在线程上下文中触发（source.thread_id 守卫）。
 #
-# 问题 4 — Clarify 并发守护（兜底防御）：
+# 问题 3 — Clarify 并发守护（兜底防御）：
 #   _handle_message_with_agent 在获得 canonical session_key 后、
-#   启动 agent 前，再次检查 clarify。当 P46（问题 3）因竞态漏网时，
+#   启动 agent 前，再次检查 clarify。当 P46（问题 2）因竞态漏网时，
 #   在最后一刻拦截消息并路由给等待中的 clarify，阻止新 Session 创建。
 #
 # 使用方法：
@@ -119,43 +118,7 @@ else:
 PYEOF
 }
 
-# ── Patch 2: 工具进度进 Thread ────────────────────────────────────────────
-
-patch_progress_thread() {
-    _do_patch "gateway/run.py" \
-        "Fix: task progress leaking to channel（修复「任务进度跑到频道里」的问题）" \
-        'or source.platform == Platform.MATTERMOST' <<'PYEOF'
-import sys
-file_path = sys.argv[1]
-with open(file_path, 'r') as f:
-    content = f.read()
-
-old = '''        _progress_reply_to = (
-            event_message_id
-            if source.platform == Platform.FEISHU and source.thread_id and event_message_id
-            else None
-        )'''
-
-new = '''        _progress_reply_to = (
-            event_message_id
-            if (
-                (source.platform == Platform.FEISHU and source.thread_id)
-                or source.platform == Platform.MATTERMOST
-            ) and event_message_id
-            else None
-        )'''
-
-if old in content:
-    content = content.replace(old, new)
-    with open(file_path, 'w') as f:
-        f.write(content)
-    print("APPLIED")
-else:
-    print("SKIP")
-PYEOF
-}
-
-# ── Patch 3: Clarify Session 分裂修复 ─────────────────────────────────────
+# ── Patch 2: Clarify Session 分裂修复 ─────────────────────────────────────
 
 patch_clarify_session() {
     _do_patch "gateway/run.py" \
@@ -197,7 +160,7 @@ else:
 PYEOF
 }
 
-# ── Patch 4: Clarify 并发守护 ─────────────────────────────────────────────
+# ── Patch 3: Clarify 并发守护 ─────────────────────────────────────────────
 
 patch_clarify_guard() {
     _do_patch "gateway/run.py" \
@@ -253,7 +216,7 @@ check_status() {
     echo "═══════════════════════════════════════════════════"
     echo ""
 
-    local ok_count=0 total=4
+    local ok_count=0 total=3
 
     echo "  ── Check ①: Can approval cards reach your DMs? ──"
     echo "     （审批卡片能不能发到你的私信）"
@@ -266,18 +229,7 @@ check_status() {
     fi
 
     echo ""
-    echo "  ── Check ②: Will task progress show in Threads or the channel? ──"
-    echo "     （任务进度会显示在 Thread 还是频道里）"
-    echo ""
-    if grep -q 'or source.platform == Platform.MATTERMOST' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
-        ok "Progress stays in Threads ✅ (where you chat, progress follows)（进度显示在 Thread 里 — 在哪聊就在哪显示）"
-        ok_count=$((ok_count + 1))
-    else
-        warn "Progress leaks to channel ⚠️ (you wait in a Thread but see no feedback)（进度会跑到频道里 — Thread 里看不到过程）"
-    fi
-
-    echo ""
-    echo "  ── Check ③: Will the AI forget what you were talking about? ──"
+    echo "  ── Check ②: Will the AI forget what you were talking about? ──"
     echo "     （AI 会不会突然忘记刚才在聊什么——Clarify 等待时失忆）"
     echo ""
     if grep -q '_canonical_entry = self.session_store.get_or_create_session' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
@@ -288,7 +240,7 @@ check_status() {
     fi
 
     echo ""
-    echo "  ── Check ④: Is there a failsafe against duplicate sessions? ──"
+    echo "  ── Check ③: Is there a failsafe against duplicate sessions? ──"
     echo "     （有没有兜底防护防止并发创建重复会话）"
     echo ""
     if grep -q 'Gateway intercepted clarify at session guard' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
@@ -332,7 +284,6 @@ apply_all() {
     info "Fixing issues with Hermes in Mattermost...（正在修复 Mattermost 相关问题...）"
     echo ""
     patch_user_id
-    patch_progress_thread
     patch_clarify_session
     patch_clarify_guard
     echo ""

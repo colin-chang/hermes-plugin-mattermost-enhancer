@@ -16,11 +16,20 @@ def register(ctx):
     from .adapter import MattermostApprovalAdapter
     from .callback_server import check_mattermost_requirements
 
+    # Reuse the bundled plugin's YAML→env config bridge so that
+    # config.yaml mattermost: keys (require_mention, free_response_channels,
+    # allowed_channels) are translated into MATTERMOST_* env vars.
+    # Without this, the enhancer's register_platform overwrites the bundled
+    # plugin's PlatformEntry including its apply_yaml_config_fn → config.yaml
+    # Mattermost settings are silently ignored.
+    from hermes_plugins.platforms_mattermost.adapter import _apply_yaml_config
+
     ctx.register_platform(
         name="mattermost",
         label="Mattermost (Approval)",
         adapter_factory=lambda cfg: MattermostApprovalAdapter(cfg),
         check_fn=check_mattermost_requirements,
+        apply_yaml_config_fn=_apply_yaml_config,
         required_env=[
             "MATTERMOST_URL",
             "MATTERMOST_TOKEN",
