@@ -1303,14 +1303,21 @@ class MattermostApprovalAdapter(MattermostAdapter):
         # to a different post.
         if isinstance(root_id, str) and root_id:
             logger.info(
-                "Mattermost: _resolve_root_id — input=%s root_id=%s (reply → use root)",
+                "Mattermost: _resolve_root_id — input=%s root_id=%s (reply in thread → use root)",
                 post_id, root_id,
             )
             result = root_id
         else:
-            # root_id is "" or missing → this post IS the thread root.
+            # root_id is "" or missing → this post IS a root-level post.
+            # IMPORTANT: this means the triggering message was sent in the
+            # CHANNEL (not inside an existing Thread). Hermes will create a
+            # NEW thread rooted at this post. If the user expected this to
+            # appear in an existing Thread, check the Mattermost UI — the
+            # message was likely typed in the channel main input, not the
+            # Thread reply box.
             logger.info(
-                "Mattermost: _resolve_root_id — input=%s is_root=True (root_id=%r)",
+                "Mattermost: _resolve_root_id — input=%s is_root=True (root_id=%r — "
+                "CHANNEL-LEVEL post, NOT in an existing Thread)",
                 post_id, root_id,
             )
             result = post_id

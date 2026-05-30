@@ -15,26 +15,24 @@
 #   ✅ WebSocket 心跳 30s→15s — 覆写 _ws_connect_and_listen()
 #   ✅ _api_put 缺少 timeout — 覆写 edit_message() 自实现 HTTP PUT
 #
-# 活跃 patch（当前 6 个）：
-#   P1. DM 审批传入 user_id（gateway/run.py）
-#       Mattermost DM 频道需要 user_id 才能把审批卡片发给正确的人。
-#       其他平台的 DM 机制不同，不受影响。
-#   P2. 工具进度消息进 Thread（gateway/run.py）
+# 活跃 patch（当前 5 个）：
+#   P1. 工具进度消息进 Thread（gateway/run.py）
 #       上游 v0.14.0 修复不完整 — 要求 thread_id 但 Mattermost
-#       auto-resume 后第一条消息还没有 thread_id。
-#   P3. Clarify Session 分裂修复（gateway/run.py）
+#       Channel-root 消息 source.thread_id 为 None。
+#   P2. Clarify Session 分裂修复（gateway/run.py）
 #       Mattermost Thread 模型下 thread_sessions_per_user 配置
 #       导致 _quick_key ≠ canonical session key，Clarify 响应发到
 #       错误的 session。
-#   P4. Clarify 并发守护（gateway/run.py）
+#   P3. Clarify 并发守护（gateway/run.py）
 #       同上场景，session key 不匹配导致 Clarify 阻塞时
 #       并发创建重复 Session。
-#   P5. Session 串台修复（gateway/run.py）
+#   P4. Session 串台修复（gateway/run.py）
 #       Gateway 重启后同 channel 多 Thread auto-resume 时
 #       响应串到错误的 Thread。
-#   P6. 批量图片 Thread 路由（adapter.py）
-#       send_multiple_images() 忽略 metadata 中的 thread_id，
-#       批量图片始终落地主频道。
+#   P5. Channel-root 消息 metadata/status 路由修复（gateway/run.py）
+#       P1 修复了 _progress_reply_to，但 _progress_thread_id 和
+#       _status_thread_metadata 仍为 None——导致 Clarify 卡片和
+#       Working... 状态消息在 channel-root 场景下失去 Thread 路由。
 #
 #   已消除：
 #     ❌ 评论→正文合并              → 已迁至主脚本 hermes-patches.sh（平台通用修复）
@@ -42,9 +40,16 @@
 #     ❌ stream fallback 丢失 reply_to → 已迁至主脚本 hermes-patches.sh（平台通用修复）
 #
 #   版本感知：
-#     最后验证: 2026-05-28
-#     Hermes 版本: v2026.5.16-1195-g458a94e42
-#     验证方式: git show origin/main:<file> | grep "<check_pattern>"
+#     最后验证: 2026-05-30
+#     Hermes 版本: v2026.5.29-190-gaa32edcac (origin/main)
+#     验证方式: 双重验证（check_pattern + old_string match）
+#
+#   已验证（v2026.5.29 / origin:main=aa32edcac）：
+#     P1. run.py (工具进度 Thread)     — ❌ 未合入，old_string ✅ 仍匹配
+#     P2. run.py (Clarify Session)    — ❌ 未合入，old_string ✅ 仍匹配
+#     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 仍匹配
+#     P4. run.py (Session 串台去重)    — ❌ 未合入，old_string ✅ 仍匹配
+#     P5. run.py (Channel metadata 路由) — 2026-05-30 新增，修复 Channel-root 消息 Thread 路由丢失
 #
 # 使用方法：
 #   ./scripts/hermes-mattermost-enhancer.sh check   # 检查状态
@@ -103,50 +108,7 @@ _do_patch() {
     return $rc
 }
 
-# ── P1: DM 审批传入 user_id ─────────────────────────────────────────────
-#
-# Mattermost DM 频道需要 user_id 才能定位到正确的用户。
-# 插件已有 _get_user_id_from_channel 降级方案，但直接传入更可靠。
-
-patch_user_id() {
-    _do_patch "gateway/run.py" \
-        "Fix: approval card not being delivered（修复「审批卡片收不到」的问题）" \
-        'user_id=source.user_id.*hasattr' <<'PYEOF'
-import sys
-file_path = sys.argv[1]
-with open(file_path, 'r') as f:
-    content = f.read()
-
-old = '''                            _status_adapter.send_exec_approval(
-                                chat_id=_status_chat_id,
-                                command=cmd,
-                                session_key=_approval_session_key,
-                                description=desc,
-                                metadata=_status_thread_metadata,
-                            ),'''
-
-new = '''                            _status_adapter.send_exec_approval(
-                                chat_id=_status_chat_id,
-                                command=cmd,
-                                session_key=_approval_session_key,
-                                description=desc,
-                                metadata=_status_thread_metadata,
-                                user_id=source.user_id if hasattr(source, 'user_id') else None,
-                            ),'''
-
-# Only apply if the OLD (unpatched) code exists AND the NEW line
-# is not already present (prevent double-patch on repeated runs).
-if old in content and "user_id=source.user_id if hasattr" not in content:
-    content = content.replace(old, new)
-    with open(file_path, 'w') as f:
-        f.write(content)
-    print("APPLIED")
-else:
-    print("SKIP")
-PYEOF
-}
-
-# ── P2: 工具进度消息进 Thread ───────────────────────────────────────────
+# ── P1: 工具进度消息进 Thread ───────────────────────────────────────────
 #
 # 上游 v0.14.0 修复了 Mattermost 进度消息的 Thread 路由，但不完整：
 #   `source.platform in (FEISHU, MATTERMOST) and source.thread_id`
@@ -189,7 +151,7 @@ else:
 PYEOF
 }
 
-# ── P3: Clarify Session 分裂修复 ────────────────────────────────────────
+# ── P2: Clarify Session 分裂修复 ────────────────────────────────────────
 #
 # Mattermost Thread 模型下，thread_sessions_per_user 配置会导致
 # _quick_key ≠ canonical session key。Clarify 使用 _quick_key 查找
@@ -236,9 +198,9 @@ else:
 PYEOF
 }
 
-# ── P4: Clarify 并发守护 ────────────────────────────────────────────────
+# ── P3: Clarify 并发守护 ────────────────────────────────────────────────
 #
-# P3 修复了「找到 pending clarify」的问题，但如果 Clarify 正在阻塞
+# P2 修复了「找到 pending clarify」的问题，但如果 Clarify 正在阻塞
 # 等待用户回复时，新消息会因为找不到 agent（_quick_key 不匹配）
 # 而触发新的 Session 创建，导致并发重复 Session。
 #
@@ -288,7 +250,7 @@ else:
 PYEOF
 }
 
-# ── P5: Session 串台修复 — 同 channel 多 thread auto-resume 去重 ──────
+# ── P4: Session 串台修复 — 同 channel 多 thread auto-resume 去重 ──────
 #
 # Gateway 重启时，同一 channel 下多个 Thread 的 session 会同时 auto-resume。
 # 此时响应可能从 Thread A 的 session 串到 Thread B，用户看到不相关的内容。
@@ -346,55 +308,69 @@ else:
 PYEOF
 }
 
-# ── P6: 批量图片 Thread 路由（bf178fe） ─────────────────────────────────
+# ── P5: Channel-root metadata/status Thread 路由 ────────────────────────
 #
-# send_multiple_images() 接收 metadata（含 thread_id）但忽略它，
-# 批量图片上传始终落地主频道而非当前 Thread。
+# P1 修复了 _progress_reply_to 对 Mattermost 去掉 source.thread_id 限制，
+# 但 _progress_thread_id 和 _status_thread_metadata 仍为 None（因为
+# source.thread_id 在 channel-root 消息上为 None）。这导致：
+#   - Clarify 卡片 (send_clarify → metadata=None → root_id=None) 落入 Channel
+#   - Working... 状态消息 (_send_or_update_status_coro → metadata=None) 落入 Channel
 #
-# 修复：从 metadata 提取 thread_id，resolve 为 root_id，
-# 在 _reply_mode == 'thread' 时注入 Mattermost post payload。
+# 修复：
+#   1. _progress_thread_id: Mattermost channel-root 消息使用 event_message_id
+#   2. _status_thread_metadata: _thread_metadata 返回 None 时降级为手动构造
 
-patch_media_thread() {
-    _do_patch "plugins/platforms/mattermost/adapter.py" \
-        "Fix: batch images land in channel not thread（修复「批量图片跑到频道里而非 Thread」的问题）" \
-        'propagate thread_id from metadata' <<'PYEOF'
+patch_progress_metadata() {
+    _do_patch "gateway/run.py" \
+        "Fix: clarify cards + status messages leak to channel（修复「Clarify + Working 状态落入频道」的问题）" \
+        'source.platform == Platform.MATTERMOST and not source.thread_id' <<'PYEOF'
 import sys
 file_path = sys.argv[1]
-with open(file_path, "r") as f:
+with open(file_path, 'r') as f:
     content = f.read()
 
-old = """                    "message": "\\n".join(caption_parts),
-                    "file_ids": file_ids,
-                }
-                logger.info(
-                    "Mattermost: sending %d image(s) as single post (chunk %d/%d)",
-                    len(file_ids), chunk_idx + 1, len(chunks),
-                )
-                data = await self._api_post("posts", payload)"""
+# ── Part A: _progress_thread_id ──
+old_a = """        if source.platform == Platform.SLACK:
+            _progress_thread_id = source.thread_id or event_message_id
+        else:
+            _progress_thread_id = source.thread_id"""
 
-new = """                    "message": "\\n".join(caption_parts),
-                    "file_ids": file_ids,
-                }
-                # Thread support: propagate thread_id from metadata
-                # (set by the Gateway runner's _thread_meta) so batch
-                # images appear in the correct Thread.
-                if (
-                    metadata
-                    and metadata.get("thread_id")
-                    and self._reply_mode == "thread"
-                ):
-                    payload["root_id"] = await self._resolve_root_id(
-                        metadata["thread_id"]
-                    )
-                logger.info(
-                    "Mattermost: sending %d image(s) as single post (chunk %d/%d)",
-                    len(file_ids), chunk_idx + 1, len(chunks),
-                )
-                data = await self._api_post("posts", payload)"""
+new_a = """        if source.platform == Platform.SLACK:
+            _progress_thread_id = source.thread_id or event_message_id
+        elif source.platform == Platform.MATTERMOST and not source.thread_id:
+            # Hermes creates the Thread upon reply when the user sends
+            # a channel-root message. Use the event message ID as the
+            # thread root so that metadata-based routing (clarify cards,
+            # status messages) lands in the correct Thread.
+            _progress_thread_id = event_message_id
+        else:
+            _progress_thread_id = source.thread_id"""
 
-if old in content and "propagate thread_id from metadata" not in content:
-    content = content.replace(old, new)
-    with open(file_path, "w") as f:
+if old_a in content:
+    content = content.replace(old_a, new_a)
+    part_a_ok = True
+else:
+    part_a_ok = False
+
+# ── Part B: _status_thread_metadata ──
+old_b = "            _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None"
+
+new_b = """            _status_thread_metadata = (
+                (
+                    self._thread_metadata_for_source(source, event_message_id)
+                    or {"thread_id": _progress_thread_id}
+                )
+                if _progress_thread_id else None
+            )"""
+
+if old_b in content:
+    content = content.replace(old_b, new_b)
+    part_b_ok = True
+else:
+    part_b_ok = False
+
+if part_a_ok or part_b_ok:
+    with open(file_path, 'w') as f:
         f.write(content)
     print("APPLIED")
 else:
@@ -417,17 +393,9 @@ check_status() {
     info "Edit message timeout 30s — adapter override（编辑消息 30 秒超时）"
     echo ""
 
-    local ok_count=0 total=6
+    local ok_count=0 total=5
 
     # P1
-    if grep -q 'user_id=source.user_id.*hasattr' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
-        ok "Fix: approval card not being delivered（修复「审批卡片收不到」的问题）"
-        ok_count=$((ok_count + 1))
-    else
-        warn "Fix: approval card not being delivered（修复「审批卡片收不到」的问题）"
-    fi
-
-    # P2
     if grep -q 'or source.platform == Platform.MATTERMOST' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
         ok "Fix: task progress leaking to channel（修复「任务进度跑到频道里」的问题）"
         ok_count=$((ok_count + 1))
@@ -435,7 +403,7 @@ check_status() {
         warn "Fix: task progress leaking to channel（修复「任务进度跑到频道里」的问题）"
     fi
 
-    # P3
+    # P2
     if grep -q '_canonical_entry = self.session_store.get_or_create_session' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
         ok "Fix: clarify session split causing AI amnesia（修复「Clarify 打断导致 AI 失忆」的问题）"
         ok_count=$((ok_count + 1))
@@ -443,7 +411,7 @@ check_status() {
         warn "Fix: clarify session split causing AI amnesia（修复「Clarify 打断导致 AI 失忆」的问题）"
     fi
 
-    # P4
+    # P3
     if grep -q 'Gateway intercepted clarify at session guard' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
         ok "Fix: clarify concurrency guard against duplicate sessions（修复「Clarify 并发创建重复会话」的问题）"
         ok_count=$((ok_count + 1))
@@ -451,7 +419,7 @@ check_status() {
         warn "Fix: clarify concurrency guard against duplicate sessions（修复「Clarify 并发创建重复会话」的问题）"
     fi
 
-    # P5
+    # P4
     if grep -q 'Deduplicate.*keep only the most recent' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
         ok "Fix: auto-resume session leaking into wrong thread（修复「Gateway重启后 session 串台」的问题）"
         ok_count=$((ok_count + 1))
@@ -459,12 +427,12 @@ check_status() {
         warn "Fix: auto-resume session leaking into wrong thread（修复「Gateway重启后 session 串台」的问题）"
     fi
 
-    # P6
-    if grep -q 'propagate thread_id from metadata' "${AGENT_DIR}/plugins/platforms/mattermost/adapter.py" 2>/dev/null; then
-        ok "Fix: batch images land in channel not thread（修复「批量图片跑到频道里」的问题）"
+    # P5
+    if grep -q 'source.platform == Platform.MATTERMOST and not source.thread_id' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
+        ok "Fix: clarify cards + status messages leak to channel（修复「Clarify + Working 状态落入频道」的问题）"
         ok_count=$((ok_count + 1))
     else
-        warn "Fix: batch images land in channel not thread（修复「批量图片跑到频道里」的问题）"
+        warn "Fix: clarify cards + status messages leak to channel（修复「Clarify + Working 状态落入频道」的问题）"
     fi
 
     echo ""
@@ -501,12 +469,11 @@ restart_gateway() {
 apply_all() {
     info "Fixing issues with Hermes in Mattermost...（正在修复 Mattermost 相关问题...）"
     echo ""
-    patch_user_id
     patch_progress_thread
     patch_clarify_session
     patch_clarify_guard
     patch_session_dedup
-    patch_media_thread
+    patch_progress_metadata
     echo ""
     ok "Patches applied!（补丁完成！）"
     echo ""

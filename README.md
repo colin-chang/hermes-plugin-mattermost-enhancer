@@ -158,7 +158,7 @@ Below are 11 bugs fixed by this project (plugin + companion shell script). Each 
 | **3** | AI questions too subtle: Hermes asks a question (multiple choice or open-ended) as plain text, easily missed in the conversation flow | You miss the question → no response → AI times out → also triggers a session split 💀 | Questions rendered as interactive cards with buttons — prominent and clickable | Adapter Override |
 | **4** | WebSocket frequent disconnects: Mattermost WebSocket disconnects every ~50s (close 258) | Brief message loss, duplicate messages, reply lag | Heartbeat optimized to 15s, connection stable | Adapter Override |
 | **5** | Media not routed to Thread: generated images/audio/video/documents appear in the main channel instead of the current Thread | You ask for an image in a Thread → image pops up in the channel, breaking the conversation flow 💀 | All media (images, audio, video, documents) correctly appear in the current Thread | Adapter Override |
-| **6** | DM approval missing user_id: Hermes can't determine which user to send the approval DM to | Approval cards may not arrive; dangerous commands may execute without approval | user_id properly passed; cards delivered on time | Shell Patch (adapter has fallback) |
+| **6** | DM approval missing user_id: Hermes can't determine which user to send the approval DM to | Approval cards may not arrive; dangerous commands may execute without approval | user_id properly passed; cards delivered on time | Adapter Override |
 | **7** | Tool progress not routed to Thread: multi-step task progress ("Searching...", "Reading file...") only appears in the main channel | You wait in a Thread with zero visibility into progress — result just pops out at the end 💀 | Progress messages correctly appear in the current Thread; you see every step in real time | Shell Patch |
 | **8** | Session split (AI amnesia): When AI is waiting for your clarify reply, your next message starts a new conversation — AI forgets everything | You're chatting fine in Thread A, then suddenly AI doesn't recognize you and gives random answers | Messages correctly delivered to the waiting AI; no new session created | Shell Patch |
 | **9** | Clarify concurrency guard: during clarify waiting, simultaneously arriving messages can bypass the session guard and create duplicate sessions | Two AI agents start responding to the same Thread — confusing duplicate replies | Intercepted at session guard before a new session spawns | Shell Patch |
@@ -166,8 +166,6 @@ Below are 11 bugs fixed by this project (plugin + companion shell script). Each 
 | **11** | Response fragmentation: AI replies split into multiple separate messages (commentary and body sent separately) | One reply arrives as 3-5 messages, poor reading experience | Commentary merged into stream, one message does the job | Shell Patch (main script) |
 
 > 💡 **Bug #11** is fixed by the main `hermes-patches.sh` script (P50 commentary merge), not this plugin's companion script. See the main script in `~/.hermes/scripts/hermes-patches.sh`.
->
-> 💡 Batch image (`send_multiple_images`) Thread routing is fixed by companion script **P6** (shell patch on bundled adapter), complementing Bug #5 (adapter override for single-file media).
 >
 > 💡 There are also two additional upstream bugs fixed via the main script: ghost empty code fences in long code blocks (P53), and stream fallback messages not routed to Threads (P55). These are uncommon but included in the same `hermes-patches.sh`.
 
@@ -194,16 +192,16 @@ You ──→ Mattermost ──→ Hermes Gateway (robot hub) ──→ AI Brain
 
 A plugin is like installing an app on your phone — it adds features and improves the experience, but can't modify the phone's operating system.
 
-- ✅ **What the plugin can change:** How the robot "replies to you" (adapter methods) — Bugs #1-5 are all implemented via adapter overrides and take effect automatically when the plugin is installed
+- ✅ **What the plugin can change:** How the robot "replies to you" (adapter methods) — Bugs #1-6 are all implemented via adapter overrides and take effect automatically when the plugin is installed
 - ❌ **What the plugin can't touch:** How the robot "gets woken up" (caller-side code) — this is deep in Hermes' source code
 
-Bugs marked **Shell Patch** in the table above (#6-10) are exactly in that untouchable caller-side code.
+Bugs marked **Shell Patch** in the table above (#7-10) are exactly in that untouchable caller-side code.
 
 ### What the Companion Script Does
 
 It fixes those plugin-unreachable bugs by modifying Hermes' source files with minimal changes:
 
-- **Companion script** (`scripts/hermes-mattermost-enhancer.sh`): Gateway-level patches specific to Mattermost interaction — DM approval routing (P1), tool progress in Thread (P2), clarify session handling (P3/P4), auto-resume dedup (P5), batch image Thread routing (P6)
+- **Companion script** (`scripts/hermes-mattermost-enhancer.sh`): Gateway-level patches specific to Mattermost interaction — tool progress in Thread (P1), clarify session handling (P2/P3), auto-resume dedup (P4), channel-root status routing (P5)
 - **Main script** (`~/.hermes/scripts/hermes-patches.sh`): Platform-agnostic Gateway fixes — commentary merge (P50), ghost code fences (P53), stream fallback reply routing (P55), plus CLI-level fixes (custom provider, model whitelist, cron encoding)
 
 > ⚠️ **Status:** These patches are maintained as local fixes. Some have been submitted upstream but are not yet merged into official Hermes releases. Running `check` after each Hermes upgrade is recommended — once upstream merges them, the scripts will report "already applied" and you can skip them.
@@ -215,10 +213,10 @@ It fixes those plugin-unreachable bugs by modifying Hermes' source files with mi
 **All three.** Install the plugin (adapter overrides + features), then run both scripts for the low-level bug fixes:
 
 ```bash
-# 1. Plugin (adapter overrides — #1-5)
+# 1. Plugin (adapter overrides — #1-6)
 hermes plugins install colin-chang/hermes-plugin-mattermost-enhancer --enable
 
-# 2. Companion script (Mattermost Gateway patches — #6-10)
+# 2. Companion script (Mattermost Gateway patches — #7-10)
 cd ~/.hermes/plugins/mattermost-enhancer
 ./scripts/hermes-mattermost-enhancer.sh apply
 
@@ -386,16 +384,14 @@ A: No. They make minimal changes. You can check status anytime with `check`. To 
 
 **Q: What if I skip the scripts?**
 
-A: Several bugs remain unfixed (those marked "Shell Patch" above: #6-11, plus P6):
-- DM approval cards may not arrive (no user_id passed)
+A: Several bugs remain unfixed (those marked "Shell Patch" above: #7-11):
 - Tool progress messages appear in the main channel, not in Threads
 - Clarify session split: new messages during clarify waiting create separate sessions (AI forgets everything)
 - Duplicate sessions may spawn during clarify waiting
 - After Gateway restart, auto-resumed sessions in the same channel can leak between Threads
 - AI replies may be fragmented into multiple separate messages
-- Batch images won't route to Threads (`send_multiple_images` lands in main channel)
 
-All adapter-override fixes (#1-5) work normally without the scripts.
+All adapter-override fixes (#1-6) work normally without the scripts.
 
 ---
 
