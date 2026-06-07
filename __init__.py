@@ -16,20 +16,26 @@ def register(ctx):
     from .adapter import MattermostApprovalAdapter
     from .callback_server import check_mattermost_requirements
 
-    # Reuse the bundled plugin's YAML→env config bridge so that
-    # config.yaml mattermost: keys (require_mention, free_response_channels,
-    # allowed_channels) are translated into MATTERMOST_* env vars.
-    # Without this, the enhancer's register_platform overwrites the bundled
-    # plugin's PlatformEntry including its apply_yaml_config_fn → config.yaml
-    # Mattermost settings are silently ignored.
-    from hermes_plugins.platforms_mattermost.adapter import _apply_yaml_config
+    # Reuse the bundled plugin's infrastructure so that the enhancer's
+    # register_platform preserves everything the bundled plugin provides
+    # (YAML→env bridge, connected-probe, interactive setup, standalone
+    # cron delivery, auth helpers, message-length limit, and display
+    # settings) while layering the enhancer's own DM-approval + slash-
+    # command + clarify-card features on top.
+    from hermes_plugins.platforms_mattermost.adapter import (
+        _apply_yaml_config,
+        _is_connected,
+        _standalone_send,
+        interactive_setup,
+        MAX_POST_LENGTH,
+    )
 
     ctx.register_platform(
         name="mattermost",
         label="Mattermost (Approval)",
         adapter_factory=lambda cfg: MattermostApprovalAdapter(cfg),
         check_fn=check_mattermost_requirements,
-        apply_yaml_config_fn=_apply_yaml_config,
+        is_connected=_is_connected,
         required_env=[
             "MATTERMOST_URL",
             "MATTERMOST_TOKEN",
@@ -38,6 +44,15 @@ def register(ctx):
             "MATTERMOST_URL=https://mm.example.com"
             " MATTERMOST_TOKEN=xxx MATTERMOST_CALLBACK_BIND=0.0.0.0"
         ),
+        setup_fn=interactive_setup,
+        apply_yaml_config_fn=_apply_yaml_config,
+        allowed_users_env="MATTERMOST_ALLOWED_USERS",
+        allow_all_env="MATTERMOST_ALLOW_ALL_USERS",
+        cron_deliver_env_var="MATTERMOST_HOME_CHANNEL",
+        standalone_sender_fn=_standalone_send,
+        max_message_length=MAX_POST_LENGTH,
+        emoji="💬",
+        allow_update_command=True,
     )
 
     # 注册 pre_gateway_dispatch hook — 实现 Channel → Thread 模型继承

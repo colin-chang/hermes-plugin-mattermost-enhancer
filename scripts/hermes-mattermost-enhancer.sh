@@ -40,16 +40,16 @@
 #     ❌ stream fallback 丢失 reply_to → 已迁至主脚本 hermes-patches.sh（平台通用修复）
 #
 #   版本感知：
-#     最后验证: 2026-05-30
-#     Hermes 版本: v2026.5.29-190-gaa32edcac (origin/main)
+#     最后验证: 2026-06-08
+#     Hermes 版本: v2026.6.5-181-gc98637723 (origin/main)
 #     验证方式: 双重验证（check_pattern + old_string match）
 #
-#   已验证（v2026.5.29 / origin:main=aa32edcac）：
+#   已验证（v2026.6.5 / origin:main=c98637723）：
 #     P1. run.py (工具进度 Thread)     — ❌ 未合入，old_string ✅ 仍匹配
 #     P2. run.py (Clarify Session)    — ❌ 未合入，old_string ✅ 仍匹配
 #     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 仍匹配
 #     P4. run.py (Session 串台去重)    — ❌ 未合入，old_string ✅ 仍匹配
-#     P5. run.py (Channel metadata 路由) — 2026-05-30 新增，修复 Channel-root 消息 Thread 路由丢失
+#     P5. run.py (Channel metadata 路由) — ❌ 未合入，old_string ✅ 仍匹配
 #
 # 使用方法：
 #   ./scripts/hermes-mattermost-enhancer.sh check   # 检查状态
@@ -215,30 +215,31 @@ file_path = sys.argv[1]
 with open(file_path, 'r') as f:
     content = f.read()
 
-old = "        session_key = session_entry.session_key\\n        self._cache_session_source(session_key, source)"
+old = """        session_key = session_entry.session_key
+        self._cache_session_source(session_key, source)"""
 
-new = "        session_key = session_entry.session_key\\n"
-new += "        # Belt-and-suspenders clarify check using the canonical session\\n"
-new += "        # key.  When _quick_key != session_key and no agent is found in\\n"
-new += "        # _running_agents under _quick_key, intercept the message before\\n"
-new += "        # a new Session spawns.\\n"
-new += "        if session_key != _quick_key:\\n"
-new += "            try:\\n"
-new += '                from tools import clarify_gateway as _clarify_mod2\\n'
-new += "                _pc = _clarify_mod2.get_pending_for_session(session_key)\\n"
-new += "                if _pc is not None:\\n"
-new += '                    _raw = (event.text or "").strip()\\n'
-new += '                    if _raw and not _raw.startswith("/"):\\n'
-new += "                        _clarify_mod2.resolve_gateway_clarify(_pc.clarify_id, _raw)\\n"
-new += "                        logger.info(\\n"
-new += '                            "Gateway intercepted clarify at session guard "\\n'
-new += '                            "(session=%s, clarify_id=%s)",\\n'
-new += "                            session_key, _pc.clarify_id,\\n"
-new += "                        )\\n"
-new += "                        return None  # consumed by clarify — no new turn\\n"
-new += "            except Exception:\\n"
-new += "                pass\\n"
-new += "        self._cache_session_source(session_key, source)"
+new = """        session_key = session_entry.session_key
+        # Belt-and-suspenders clarify check using the canonical session
+        # key.  When _quick_key != session_key and no agent is found in
+        # _running_agents under _quick_key, intercept the message before
+        # a new Session spawns.
+        if session_key != _quick_key:
+            try:
+                from tools import clarify_gateway as _clarify_mod2
+                _pc = _clarify_mod2.get_pending_for_session(session_key)
+                if _pc is not None:
+                    _raw = (event.text or "").strip()
+                    if _raw and not _raw.startswith("/"):
+                        _clarify_mod2.resolve_gateway_clarify(_pc.clarify_id, _raw)
+                        logger.info(
+                            "Gateway intercepted clarify at session guard "
+                            "(session=%s, clarify_id=%s)",
+                            session_key, _pc.clarify_id,
+                        )
+                        return None  # consumed by clarify — no new turn
+            except Exception:
+                pass
+        self._cache_session_source(session_key, source)"""
 
 if old in content:
     content = content.replace(old, new, 1)
