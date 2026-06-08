@@ -83,6 +83,8 @@ class MattermostApprovalAdapter(MattermostAdapter):
     def __init__(self, config):
         super().__init__(config)
         self._model_picker_callbacks: Dict[str, Callable] = {}
+        # Channel type 缓存: channel_id → chat_type（避免每次 /model 都调 API）
+        self._channel_type_cache: Dict[str, str] = {}
 
         # ── Callback server 配置 ──
         self._callback_server = None
@@ -377,7 +379,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         provider_groups = get_models_by_provider()
 
         # 2. 当前模型
-        current_model = self._get_current_model_for_session(channel_id, root_id)
+        current_model = await self._get_current_model_for_session(channel_id, root_id)
 
         # 4. 渲染卡片（分组模式）
         callback_url = self._build_callback_url()
@@ -390,7 +392,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         )
 
         # 5. 注入 session_key + provider 到按钮 context
-        session_key = self._build_session_key(channel_id, root_id)
+        session_key = await self._build_session_key(channel_id, root_id)
         self._inject_model_context(card, session_key)
 
         # 6. Bot API 发帖到 thread（Bot 头像，非用户头像）
@@ -420,7 +422,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
             user_id=user_id,
         )
 
-        session_key = self._build_session_key(channel_id, root_id)
+        session_key = await self._build_session_key(channel_id, root_id)
         self._inject_session_key(card, session_key)
 
         post_id = await self._post_card_in_thread(channel_id, root_id, card)
@@ -439,20 +441,30 @@ class MattermostApprovalAdapter(MattermostAdapter):
     # Session 上下文辅助
     # ══════════════════════════════════════════════════════════════════════
 
-    def _build_session_key(self, channel_id: str, root_id: Optional[str]) -> str:
-        """构建 session_key，对齐 Gateway 的 build_session_key 格式。
-        格式: agent:main:mattermost:group:<channel_id>[:<root_id>]
+    async def _build_session_key(self, channel_id: str, root_id: Optional[str]) -> str:
+        """构建 session_key，与 Gateway build_session_key 完全对齐。
+
+        通过 Mattermost API 获取频道类型（"O"→channel, "G"/"P"→group, "D"→dm），
+        缓存结果避免重复 API 调用。
         """
-        key = f"agent:main:mattermost:group:{channel_id}"
+        chat_type = self._channel_type_cache.get(channel_id)
+        if chat_type is None:
+            try:
+                info = await self.get_chat_info(channel_id)
+                chat_type = info.get("type", "channel")
+            except Exception:
+                chat_type = "channel"
+            self._channel_type_cache[channel_id] = chat_type
+        key = f"agent:main:mattermost:{chat_type}:{channel_id}"
         if root_id:
             key += f":{root_id}"
         return key
 
-    def _get_current_model_for_session(
+    async def _get_current_model_for_session(
         self, channel_id: str, root_id: Optional[str],
     ) -> str:
         """获取当前 session 使用的模型名。"""
-        session_key = self._build_session_key(channel_id, root_id)
+        session_key = await self._build_session_key(channel_id, root_id)
 
         # 先查 session override
         try:
