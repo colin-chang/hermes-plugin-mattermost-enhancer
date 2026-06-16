@@ -29,10 +29,11 @@
 #   P4. Session 串台修复（gateway/run.py）
 #       Gateway 重启后同 channel 多 Thread auto-resume 时
 #       响应串到错误的 Thread。
-#   P5. Channel-root 消息 metadata/status 路由修复（gateway/run.py）
-#       P1 修复了 _progress_reply_to，但 _progress_thread_id 和
-#       _status_thread_metadata 仍为 None——导致 Clarify 卡片和
-#       Working... 状态消息在 channel-root 场景下失去 Thread 路由。
+#   P5. Status 消息 Thread 路由修复（gateway/run.py）
+#       上游 v2026.6.5-1117 引入了 _resolve_progress_thread_id()
+#       修复了 _progress_thread_id，但 _status_thread_metadata 未同步：
+#       _thread_metadata_for_source 在 channel-root 时返回 None，
+#       导致 Clarify 卡片和 Working... 状态落入频道。
 #
 #   已消除：
 #     ❌ 评论→正文合并              → 已迁至主脚本 hermes-patches.sh（平台通用修复）
@@ -40,16 +41,17 @@
 #     ❌ stream fallback 丢失 reply_to → 已迁至主脚本 hermes-patches.sh（平台通用修复）
 #
 #   版本感知：
-#     最后验证: 2026-06-08
-#     Hermes 版本: v2026.6.5-181-gc98637723 (origin/main)
+#     最后验证: 2026-06-17
+#     Hermes 版本: v2026.6.5-1117-g17251e865 (origin/main=17251e865)
 #     验证方式: 双重验证（check_pattern + old_string match）
+#     Bundled MM 插件: 零变更（自 v0.14.0 迁移后无代码变化）
 #
-#   已验证（v2026.6.5 / origin:main=c98637723）：
+#   已验证（v2026.6.5-1117 / origin:main=17251e865）：
 #     P1. run.py (工具进度 Thread)     — ❌ 未合入，old_string ✅ 仍匹配
 #     P2. run.py (Clarify Session)    — ❌ 未合入，old_string ✅ 仍匹配
 #     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 仍匹配
 #     P4. run.py (Session 串台去重)    — ❌ 未合入，old_string ✅ 仍匹配
-#     P5. run.py (Channel metadata 路由) — ❌ 未合入，old_string ✅ 仍匹配
+#     P5. run.py (Status 路由)        — Part A ✅ 上游已合入 (_resolve_progress_thread_id)；Part B ❌ 未合入，old_string ✅ 仍匹配
 #
 # 使用方法：
 #   ./scripts/hermes-mattermost-enhancer.sh check   # 检查状态
@@ -309,68 +311,37 @@ else:
 PYEOF
 }
 
-# ── P5: Channel-root metadata/status Thread 路由 ────────────────────────
+# ── P5: _status_thread_metadata Thread 路由 ────────────────────────────
 #
-# P1 修复了 _progress_reply_to 对 Mattermost 去掉 source.thread_id 限制，
-# 但 _progress_thread_id 和 _status_thread_metadata 仍为 None（因为
-# source.thread_id 在 channel-root 消息上为 None）。这导致：
-#   - Clarify 卡片 (send_clarify → metadata=None → root_id=None) 落入 Channel
-#   - Working... 状态消息 (_send_or_update_status_coro → metadata=None) 落入 Channel
+# 上游 v2026.6.5-1117 引入了 _resolve_progress_thread_id() 正确设置
+# _progress_thread_id（Part A 已合入）。但 _status_thread_metadata 仍有问题：
+# _thread_metadata_for_source 在 channel-root 时返回 None（因为
+# source.thread_id=None），导致 Clarify 卡片和 Working... 状态落入频道。
 #
-# 修复：
-#   1. _progress_thread_id: Mattermost channel-root 消息使用 event_message_id
-#   2. _status_thread_metadata: _thread_metadata 返回 None 时降级为手动构造
+# 修复：_thread_metadata_for_source 返回 None 时降级为手动构造 metadata。
 
 patch_progress_metadata() {
     _do_patch "gateway/run.py" \
         "Fix: clarify cards + status messages leak to channel（修复「Clarify + Working 状态落入频道」的问题）" \
-        'source.platform == Platform.MATTERMOST and not source.thread_id' <<'PYEOF'
+        'Fallback: use _progress_thread_id when thread_metadata returns None' <<'PYEOF'
 import sys
 file_path = sys.argv[1]
 with open(file_path, 'r') as f:
     content = f.read()
 
-# ── Part A: _progress_thread_id ──
-old_a = """        if source.platform == Platform.SLACK:
-            _progress_thread_id = source.thread_id or event_message_id
-        else:
-            _progress_thread_id = source.thread_id"""
+old = "            _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None"
 
-new_a = """        if source.platform == Platform.SLACK:
-            _progress_thread_id = source.thread_id or event_message_id
-        elif source.platform == Platform.MATTERMOST and not source.thread_id:
-            # Hermes creates the Thread upon reply when the user sends
-            # a channel-root message. Use the event message ID as the
-            # thread root so that metadata-based routing (clarify cards,
-            # status messages) lands in the correct Thread.
-            _progress_thread_id = event_message_id
-        else:
-            _progress_thread_id = source.thread_id"""
-
-if old_a in content:
-    content = content.replace(old_a, new_a)
-    part_a_ok = True
-else:
-    part_a_ok = False
-
-# ── Part B: _status_thread_metadata ──
-old_b = "            _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None"
-
-new_b = """            _status_thread_metadata = (
+new = """            _status_thread_metadata = (
                 (
                     self._thread_metadata_for_source(source, event_message_id)
+                    # Fallback: use _progress_thread_id when thread_metadata returns None
                     or {"thread_id": _progress_thread_id}
                 )
                 if _progress_thread_id else None
             )"""
 
-if old_b in content:
-    content = content.replace(old_b, new_b)
-    part_b_ok = True
-else:
-    part_b_ok = False
-
-if part_a_ok or part_b_ok:
+if old in content:
+    content = content.replace(old, new)
     with open(file_path, 'w') as f:
         f.write(content)
     print("APPLIED")
@@ -429,7 +400,7 @@ check_status() {
     fi
 
     # P5
-    if grep -q 'source.platform == Platform.MATTERMOST and not source.thread_id' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
+    if grep -q 'Fallback: use _progress_thread_id when thread_metadata returns None' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
         ok "Fix: clarify cards + status messages leak to channel（修复「Clarify + Working 状态落入频道」的问题）"
         ok_count=$((ok_count + 1))
     else
