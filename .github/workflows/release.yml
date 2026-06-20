@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号 (例如 v2.2.0)'
+        description: '版本号 (例如 v2026.6.19，对齐 Hermes CalVer)'
         required: true
         type: string
       notes:
@@ -28,9 +28,9 @@ jobs:
       - name: Validate version format
         run: |
           VERSION="${{ github.event.inputs.version }}"
-          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+          if ! echo "$VERSION" | grep -qE '^v[0-9]{4}\.[0-9]+\.[0-9]+$'; then
             echo "❌ 版本号格式错误：$VERSION"
-            echo "正确格式：v2.2.0"
+            echo "正确格式：v2026.6.19（对齐 Hermes CalVer）"
             exit 1
           fi
           if git rev-parse "$VERSION" >/dev/null 2>&1; then
