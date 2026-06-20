@@ -41,12 +41,12 @@
 #     ❌ stream fallback 丢失 reply_to → 已迁至主脚本 hermes-patches.sh（平台通用修复）
 #
 #   版本感知：
-#     最后验证: 2026-06-17
-#     Hermes 版本: v2026.6.5-1117-g17251e865 (origin/main=17251e865)
+#     最后验证: 2026-06-20
+#     Hermes 版本: v2026.6.19-51-gb88d0007c9 (origin/main=b88d0007c9)
 #     验证方式: 双重验证（check_pattern + old_string match）
-#     Bundled MM 插件: 零变更（自 v0.14.0 迁移后无代码变化）
+#     Bundled MM 插件: 上游新增 _post_preserving_thread / _thread_root_for_send / _api_put（5a0e0d35b9, af973e4071）
 #
-#   已验证（v2026.6.5-1117 / origin:main=17251e865）：
+#   已验证（v2026.6.19-51 / origin:main=b88d0007c9）：
 #     P1. run.py (工具进度 Thread)     — ❌ 未合入，old_string ✅ 仍匹配
 #     P2. run.py (Clarify Session)    — ❌ 未合入，old_string ✅ 仍匹配
 #     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 仍匹配
@@ -217,10 +217,12 @@ file_path = sys.argv[1]
 with open(file_path, 'r') as f:
     content = f.read()
 
-old = """        session_key = session_entry.session_key
-        self._cache_session_source(session_key, source)"""
+old = """        if not self._get_cached_session_source(session_key):
+            self._cache_session_source(session_key, source)
+        if self._is_telegram_topic_lane(source):"""
 
-new = """        session_key = session_entry.session_key
+new = """        if not self._get_cached_session_source(session_key):
+            self._cache_session_source(session_key, source)
         # Belt-and-suspenders clarify check using the canonical session
         # key.  When _quick_key != session_key and no agent is found in
         # _running_agents under _quick_key, intercept the message before
@@ -241,7 +243,7 @@ new = """        session_key = session_entry.session_key
                         return None  # consumed by clarify — no new turn
             except Exception:
                 pass
-        self._cache_session_source(session_key, source)"""
+        if self._is_telegram_topic_lane(source):"""
 
 if old in content:
     content = content.replace(old, new, 1)

@@ -359,7 +359,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                 "message": message,
                 "props": props,
             }
-            data = await self._api_post(f"posts/{post_id}", payload, method="PUT")
+            data = await self._api_put(f"posts/{post_id}/patch", payload)
             return bool(data and "id" in data)
         except Exception as e:
             logger.error("Error updating post %s: %s", post_id, e)
@@ -1533,7 +1533,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                     self._reply_mode, reply_to, chat_id,
                 )
 
-            data = await self._api_post("posts", payload)
+            data = await self._post_preserving_thread(chat_id, payload, metadata)
             if not data or "id" not in data:
                 return SendResult(success=False, error="Failed to create post")
             last_id = data["id"]
@@ -1706,7 +1706,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                     "Mattermost: sending %d image(s) as single post (chunk %d/%d)",
                     len(file_ids), chunk_idx + 1, len(chunks),
                 )
-                data = await self._api_post("posts", payload)
+                data = await self._post_preserving_thread(chat_id, payload, metadata)
                 if not data or "id" not in data:
                     logger.warning("Mattermost: multi-image post failed, falling back")
                     await super().send_multiple_images(chat_id, chunk, metadata, human_delay=human_delay)
@@ -1746,7 +1746,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         """覆写父类 send_image：metadata → reply_to 推导."""
         reply_to = self._derive_reply_to(reply_to, metadata)
         return await self._send_url_as_file(
-            chat_id, image_url, caption, reply_to, "image"
+            chat_id, image_url, caption, reply_to, "image", metadata=metadata
         )
 
     async def send_image_file(
@@ -1760,7 +1760,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         """覆写父类 send_image_file：metadata → reply_to 推导."""
         reply_to = self._derive_reply_to(reply_to, metadata)
         return await self._send_local_file(
-            chat_id, image_path, caption, reply_to
+            chat_id, image_path, caption, reply_to, metadata=metadata
         )
 
     async def send_document(
@@ -1775,7 +1775,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         """覆写父类 send_document：metadata → reply_to 推导."""
         reply_to = self._derive_reply_to(reply_to, metadata)
         return await self._send_local_file(
-            chat_id, file_path, caption, reply_to, file_name
+            chat_id, file_path, caption, reply_to, file_name, metadata=metadata
         )
 
     async def send_video(
@@ -1789,7 +1789,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         """覆写父类 send_video：metadata → reply_to 推导."""
         reply_to = self._derive_reply_to(reply_to, metadata)
         return await self._send_local_file(
-            chat_id, video_path, caption, reply_to
+            chat_id, video_path, caption, reply_to, metadata=metadata
         )
 
     async def send_voice(
@@ -1803,7 +1803,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         """覆写父类 send_voice：metadata → reply_to 推导."""
         reply_to = self._derive_reply_to(reply_to, metadata)
         return await self._send_local_file(
-            chat_id, audio_path, caption, reply_to
+            chat_id, audio_path, caption, reply_to, metadata=metadata
         )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1817,6 +1817,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         caption: Optional[str],
         reply_to: Optional[str],
         file_name: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """覆写父类 _send_local_file：文件不存在时静默跳过 + Thread root_id 解析."""
         import mimetypes
@@ -1847,7 +1848,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         if root_id:
             payload["root_id"] = root_id
 
-        data = await self._api_post("posts", payload)
+        data = await self._post_preserving_thread(chat_id, payload, metadata)
         if not data or "id" not in data:
             return SendResult(success=False, error="Failed to post with file")
         return SendResult(success=True, message_id=data["id"])
@@ -1863,6 +1864,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         caption: Optional[str],
         reply_to: Optional[str],
         kind: str = "file",
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """覆写父类 _send_url_as_file：添加 Thread root_id 解析."""
         from tools.url_safety import is_safe_url
@@ -1914,7 +1916,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         if root_id:
             payload["root_id"] = root_id
 
-        data = await self._api_post("posts", payload)
+        data = await self._post_preserving_thread(chat_id, payload, metadata)
         if not data or "id" not in data:
             return SendResult(success=False, error="Failed to post with file")
         return SendResult(success=True, message_id=data["id"])
