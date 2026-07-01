@@ -41,17 +41,17 @@
 #     ❌ stream fallback 丢失 reply_to → 已迁至主脚本 hermes-patches.sh（平台通用修复）
 #
 #   版本感知：
-#     最后验证: 2026-06-20
-#     Hermes 版本: v2026.6.19-51-gb88d0007c9 (origin/main=b88d0007c9)
+#     最后验证: 2026-07-01
+#     Hermes 版本: v2026.6.19-1911-g2f167a2b84 (origin/main=1bfe08145c)
 #     验证方式: 双重验证（check_pattern + old_string match）
-#     Bundled MM 插件: 上游新增 _post_preserving_thread / _thread_root_for_send / _api_put（5a0e0d35b9, af973e4071）
+#     P2-P4: old_string 断裂后已重写（include_choice_prompts / async wrapper / Defense-3）
 #
-#   已验证（v2026.6.19-51 / origin:main=b88d0007c9）：
+#   已验证（v2026.6.19-1911 / origin:main=1bfe08145c）：
 #     P1. run.py (工具进度 Thread)     — ❌ 未合入，old_string ✅ 仍匹配
-#     P2. run.py (Clarify Session)    — ❌ 未合入，old_string ✅ 仍匹配
-#     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 仍匹配
-#     P4. run.py (Session 串台去重)    — ❌ 未合入，old_string ✅ 仍匹配
-#     P5. run.py (Status 路由)        — Part A ✅ 上游已合入 (_resolve_progress_thread_id)；Part B ❌ 未合入，old_string ✅ 仍匹配
+#     P2. run.py (Clarify Session)    — ❌ 未合入，old_string ✅ 已重写
+#     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 已重写
+#     P4. run.py (Session 串台去重)    — ❌ 未合入，old_string ✅ 已重写
+#     P5. run.py (Status 路由)        — ❌ 未合入，old_string ✅ 仍匹配
 #
 # 使用方法：
 #   ./scripts/hermes-mattermost-enhancer.sh check   # 检查状态
@@ -169,11 +169,15 @@ file_path = sys.argv[1]
 with open(file_path, 'r') as f:
     content = f.read()
 
-old = '''            _pending_clarify = _clarify_mod.get_pending_for_session(_quick_key)
+old = '''            _pending_clarify = _clarify_mod.get_pending_for_session(
+                _quick_key, include_choice_prompts=True,
+            )
         except Exception:
             _pending_clarify = None'''
 
-new = '''            _pending_clarify = _clarify_mod.get_pending_for_session(_quick_key)
+new = '''            _pending_clarify = _clarify_mod.get_pending_for_session(
+                _quick_key, include_choice_prompts=True,
+            )
             # When _quick_key doesn't match (thread_sessions_per_user config
             # mismatch), fall back to the canonical session key.  Only in
             # Thread contexts — non-Thread paths always have _quick_key ==
@@ -184,7 +188,9 @@ new = '''            _pending_clarify = _clarify_mod.get_pending_for_session(_qu
                     _canonical_entry = self.session_store.get_or_create_session(source)
                     _canonical_key = _canonical_entry.session_key
                     if _canonical_key != _quick_key:
-                        _pending_clarify = _clarify_mod.get_pending_for_session(_canonical_key)
+                        _pending_clarify = _clarify_mod.get_pending_for_session(
+                            _canonical_key, include_choice_prompts=True,
+                        )
                 except Exception:
                     pass
         except Exception:
@@ -217,11 +223,23 @@ file_path = sys.argv[1]
 with open(file_path, 'r') as f:
     content = f.read()
 
-old = """        if not self._get_cached_session_source(session_key):
+old = """        session_entry = self.session_store.get_or_create_session(source)
+        session_key = session_entry.session_key
+        # Preserve original session source on resume — don't overwrite with
+        # interrupting event's metadata.  This prevents cross-thread routing
+        # when an inbound message from a different thread interrupts a running
+        # agent and causes the session to restart with wrong thread_id/message_id.
+        if not self._get_cached_session_source(session_key):
             self._cache_session_source(session_key, source)
-        if self._is_telegram_topic_lane(source):"""
+        if await asyncio.to_thread(self._is_telegram_topic_lane, source):"""
 
-new = """        if not self._get_cached_session_source(session_key):
+new = """        session_entry = self.session_store.get_or_create_session(source)
+        session_key = session_entry.session_key
+        # Preserve original session source on resume — don't overwrite with
+        # interrupting event's metadata.  This prevents cross-thread routing
+        # when an inbound message from a different thread interrupts a running
+        # agent and causes the session to restart with wrong thread_id/message_id.
+        if not self._get_cached_session_source(session_key):
             self._cache_session_source(session_key, source)
         # Belt-and-suspenders clarify check using the canonical session
         # key.  When _quick_key != session_key and no agent is found in
@@ -243,7 +261,7 @@ new = """        if not self._get_cached_session_source(session_key):
                         return None  # consumed by clarify — no new turn
             except Exception:
                 pass
-        if self._is_telegram_topic_lane(source):"""
+        if await asyncio.to_thread(self._is_telegram_topic_lane, source):"""
 
 if old in content:
     content = content.replace(old, new, 1)
@@ -275,6 +293,26 @@ old = """        except Exception as exc:
             logger.warning("Failed to enumerate resume-pending sessions: %s", exc)
             return 0
 
+        # Defense-3 (#30719): break the SIGTERM-respawn loop. Only count this
+        # boot when there are restart-interrupted sessions to resume — a clean
+        # boot must not accrue toward the breaker. If too many such boots have
+        # happened in the configured window, skip auto-resume for THIS boot:
+        # the gateway still comes up and serves real inbound messages, it just
+        # stops replaying the session that keeps killing it. The session stays
+        # resume_pending, so a real user message can still continue it (a human
+        # is now in the loop). Defenses 1-2 cover the cron/CLI/terminal paths;
+        # this catches every other SIGTERM source (e.g. a raw `terminal(
+        # "launchctl kickstart ai.hermes.gateway")`).
+        if candidates:
+            try:
+                from gateway import restart_loop_guard as _rlg
+
+                _max_restarts, _window = self._restart_loop_guard_config()
+                if _rlg.check_and_record(_max_restarts, _window):
+                    return 0
+            except Exception as exc:  # noqa: BLE001 — breaker must fail OPEN
+                logger.debug("Restart-loop guard check skipped: %s", exc)
+
         now = datetime.now()"""
 
 new = """        except Exception as exc:
@@ -300,6 +338,26 @@ new = """        except Exception as exc:
             ):
                 _per_chat[key] = entry
         candidates = list(_per_chat.values())
+
+        # Defense-3 (#30719): break the SIGTERM-respawn loop. Only count this
+        # boot when there are restart-interrupted sessions to resume — a clean
+        # boot must not accrue toward the breaker. If too many such boots have
+        # happened in the configured window, skip auto-resume for THIS boot:
+        # the gateway still comes up and serves real inbound messages, it just
+        # stops replaying the session that keeps killing it. The session stays
+        # resume_pending, so a real user message can still continue it (a human
+        # is now in the loop). Defenses 1-2 cover the cron/CLI/terminal paths;
+        # this catches every other SIGTERM source (e.g. a raw `terminal(
+        # "launchctl kickstart ai.hermes.gateway")`).
+        if candidates:
+            try:
+                from gateway import restart_loop_guard as _rlg
+
+                _max_restarts, _window = self._restart_loop_guard_config()
+                if _rlg.check_and_record(_max_restarts, _window):
+                    return 0
+            except Exception as exc:  # noqa: BLE001 — breaker must fail OPEN
+                logger.debug("Restart-loop guard check skipped: %s", exc)
 
         now = datetime.now()"""
 
