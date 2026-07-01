@@ -1233,12 +1233,12 @@ class MattermostApprovalAdapter(MattermostAdapter):
                 logger.info("Mattermost: WebSocket closed (%s)", raw_msg.type)
                 break
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Mattermost — 覆写父类，追加回调服务器启动."""
         import asyncio
 
         # 先调用内置 connect（认证 + WebSocket）
-        result = await super().connect()
+        result = await super().connect(is_reconnect=is_reconnect)
         if not result:
             return False
 
