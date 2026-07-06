@@ -41,16 +41,16 @@
 #     ❌ stream fallback 丢失 reply_to → 已迁至主脚本 hermes-patches.sh（平台通用修复）
 #
 #   版本感知：
-#     最后验证: 2026-07-01
-#     Hermes 版本: v2026.6.19-1911-g2f167a2b84 (origin/main=1bfe08145c)
+#     最后验证: 2026-07-06
+#     Hermes 版本: v2026.7.1-516-g7426c09bee (origin/main=7426c09bee)
 #     验证方式: 双重验证（check_pattern + old_string match）
-#     P2-P4: old_string 断裂后已重写（include_choice_prompts / async wrapper / Defense-3）
+#     P3: old_string 重写 — 上游移除 _get_cached_session_source guard
 #
-#   已验证（v2026.6.19-1911 / origin:main=1bfe08145c）：
+#   已验证（v2026.7.1-516 / origin:main=7426c09bee）：
 #     P1. run.py (工具进度 Thread)     — ❌ 未合入，old_string ✅ 仍匹配
-#     P2. run.py (Clarify Session)    — ❌ 未合入，old_string ✅ 已重写
-#     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 已重写
-#     P4. run.py (Session 串台去重)    — ❌ 未合入，old_string ✅ 已重写
+#     P2. run.py (Clarify Session)    — ❌ 未合入，old_string ✅ 仍匹配
+#     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 已重写（上游移除 guard）
+#     P4. run.py (Session 串台去重)    — ❌ 未合入，old_string ✅ 仍匹配
 #     P5. run.py (Status 路由)        — ❌ 未合入，old_string ✅ 仍匹配
 #
 # 使用方法：
@@ -212,6 +212,9 @@ PYEOF
 # 等待用户回复时，新消息会因为找不到 agent（_quick_key 不匹配）
 # 而触发新的 Session 创建，导致并发重复 Session。
 #
+# 上游 v2026.7.1 移除了 _get_cached_session_source guard（改为无条件
+# 覆盖 session source），P3 old_string 已适配重写。
+#
 # 修复：在 session 创建前多加一道 canonical key 的 Clarify 检查。
 
 patch_clarify_guard() {
@@ -225,12 +228,7 @@ with open(file_path, 'r') as f:
 
 old = """        session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
-        # Preserve original session source on resume — don't overwrite with
-        # interrupting event's metadata.  This prevents cross-thread routing
-        # when an inbound message from a different thread interrupts a running
-        # agent and causes the session to restart with wrong thread_id/message_id.
-        if not self._get_cached_session_source(session_key):
-            self._cache_session_source(session_key, source)
+        self._cache_session_source(session_key, source)
         if await asyncio.to_thread(self._is_telegram_topic_lane, source):"""
 
 new = """        session_entry = self.session_store.get_or_create_session(source)
