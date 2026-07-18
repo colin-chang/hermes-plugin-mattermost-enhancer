@@ -815,13 +815,21 @@ class MattermostApprovalAdapter(MattermostAdapter):
         description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
+        allow_permanent: bool = True,
+        smart_denied: bool = False,
     ) -> SendResult:
         """发送按钮式审批提示到用户 DM.
 
         Bot API 创建的帖子 integration 字段虽被 API 响应剥离，
         但数据库中完整保留，MM 服务端处理按钮点击时从 DB 读取，
         因此 Bot API + DM 方式可正常触发回调。
+
+        Args:
+            allow_permanent: True → 显示 "Always Allow" 永久授权按钮
+            smart_denied: True → 追加 owner override 提示（仅本次生效）
         """
+        if smart_denied:
+            description += "（Owner override，仅本次生效）"
         if not user_id:
             # 替代 patch 8：从 chat_id 反查 DM channel members 推导 user_id
             user_id = await self._get_user_id_from_channel(chat_id)
@@ -848,6 +856,65 @@ class MattermostApprovalAdapter(MattermostAdapter):
             )
 
             # 3. 构建 Interactive Message
+            # ── 基础按钮（始终显示）──
+            base_actions = [
+                {
+                    "id": "approveonce",
+                    "name": "Allow Once",
+                    "type": "button",
+                    "style": "primary",
+                    "integration": {
+                        "url": callback_url,
+                        "context": {
+                            "action": "approve_once",
+                            "session_key": session_key,
+                            "command": command,
+                        },
+                    },
+                },
+                {
+                    "id": "approvesession",
+                    "name": "Allow Session",
+                    "type": "button",
+                    "integration": {
+                        "url": callback_url,
+                        "context": {
+                            "action": "approve_session",
+                            "session_key": session_key,
+                            "command": command,
+                        },
+                    },
+                },
+            ]
+            # ── 永久授权按钮（仅 allow_permanent=True 时显示）──
+            if allow_permanent and not smart_denied:
+                base_actions.append({
+                    "id": "approvealways",
+                    "name": "Always Allow",
+                    "type": "button",
+                    "integration": {
+                        "url": callback_url,
+                        "context": {
+                            "action": "approve_always",
+                            "session_key": session_key,
+                            "command": command,
+                        },
+                    },
+                })
+            base_actions.append({
+                "id": "deny",
+                "name": "Deny",
+                "type": "button",
+                "style": "danger",
+                "integration": {
+                    "url": callback_url,
+                    "context": {
+                        "action": "deny",
+                        "session_key": session_key,
+                    },
+                },
+            })
+
             attachment = {
                 "fallback": f"⚠️ 危险命令需要审批: {command[:100]}",
                 "color": "#ff9900",
@@ -856,61 +923,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                     f"**Reason:** {description}\n\n"
                     f"请点击下方按钮审批或拒绝此操作。"
                 ),
-                "actions": [
-                    {
-                        "id": "approveonce",
-                        "name": "Allow Once",
-                        "type": "button",
-                        "style": "primary",
-                        "integration": {
-                            "url": callback_url,
-                            "context": {
-                                "action": "approve_once",
-                                "session_key": session_key,
-                                "command": command,
-                            },
-                        },
-                    },
-                    {
-                        "id": "approvesession",
-                        "name": "Allow Session",
-                        "type": "button",
-                        "integration": {
-                            "url": callback_url,
-                            "context": {
-                                "action": "approve_session",
-                                "session_key": session_key,
-                                "command": command,
-                            },
-                        },
-                    },
-                    {
-                        "id": "approvealways",
-                        "name": "Always Allow",
-                        "type": "button",
-                        "integration": {
-                            "url": callback_url,
-                            "context": {
-                                "action": "approve_always",
-                                "session_key": session_key,
-                                "command": command,
-                            },
-                        },
-                    },
-                    {
-                        "id": "deny",
-                        "name": "Deny",
-                        "type": "button",
-                        "style": "danger",
-                        "integration": {
-                            "url": callback_url,
-                            "context": {
-                                "action": "deny",
-                                "session_key": session_key,
-                            },
-                        },
-                    },
-                ],
+                "actions": base_actions,
             }
 
             # 4. 通过 Bot API 发送到 DM（props.attachments）
