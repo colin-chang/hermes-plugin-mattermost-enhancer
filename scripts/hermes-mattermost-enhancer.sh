@@ -218,8 +218,11 @@ PYEOF
 #
 # 上游 v2026.7.7.2-1653 (8f33e39682) 完全移除了「Preserve original session
 # source」注释块和 _get_cached_session_source guard，改为无条件调用
-# _cache_session_source。old_string 已适配为新的最小锚点——
-# 仅匹配 _cache_session_source + _is_telegram_topic_lane 两行。
+# _cache_session_source。
+#
+# v2026.7.7.5: 自适应缩进 — 运行时检测 hermes-patches.sh P60a 守卫是否存在，
+# 自动选择 12sp（守卫内）或 8sp（无守卫），兼容独立安装和联合使用两种场景。
+# old_string 使用 \n 前缀防止 12sp/8sp 子串误匹配。
 #
 # 修复：在 session 创建前多加一道 canonical key 的 Clarify 检查。
 
@@ -232,33 +235,41 @@ file_path = sys.argv[1]
 with open(file_path, 'r') as f:
     content = f.read()
 
-old = """        self._cache_session_source(session_key, source)
-        if await asyncio.to_thread(self._is_telegram_topic_lane, source):"""
+# P60a guard (from hermes-patches.sh) may wrap this region with an
+# additional `if not self._get_cached_session_source` at 8-space.
+# When present, our clarify check must sit at 12-space inside the guard;
+# _cache_session_source stays at 8-space outside (matching Colin's fix).
+_p60a_guard = "if not self._get_cached_session_source(session_key):" in content
+_ind = "            " if _p60a_guard else "        "  # 12sp vs 8sp
 
-new = """        # Belt-and-suspenders clarify check using the canonical session
-        # key.  When _quick_key != session_key and no agent is found in
-        # _running_agents under _quick_key, intercept the message before
-        # a new Session spawns.
-        if session_key != _quick_key:
-            try:
-                from tools import clarify_gateway as _clarify_mod2
-                _pc = _clarify_mod2.get_pending_for_session(session_key)
-                if _pc is not None:
-                    _raw = (event.text or "").strip()
-                    if _raw and not _raw.startswith("/"):
-                        _clarify_mod2.resolve_gateway_clarify(_pc.clarify_id, _raw)
-                        logger.info(
-                            "Gateway intercepted clarify at session guard "
-                            "(session=%s, clarify_id=%s)",
-                            session_key, _pc.clarify_id,
-                        )
-                        return None  # consumed by clarify — no new turn
-            except Exception:
-                pass
-        self._cache_session_source(session_key, source)
-        if await asyncio.to_thread(self._is_telegram_topic_lane, source):"""
+# old_string adapts to P60a guard presence: matches the 12sp guarded
+# copy when guard exists, the 8sp original otherwise.  \n prefix
+# prevents false substring matches across indent levels.
+old = f"\n{_ind}self._cache_session_source(session_key, source)"
 
-if old in content:
+new = "\n" + f"""{_ind}# Belt-and-suspenders clarify check using the canonical session
+{_ind}# key.  When _quick_key != session_key and no agent is found in
+{_ind}# _running_agents under _quick_key, intercept the message before
+{_ind}# a new Session spawns.
+{_ind}if session_key != _quick_key:
+{_ind}    try:
+{_ind}        from tools import clarify_gateway as _clarify_mod2
+{_ind}        _pc = _clarify_mod2.get_pending_for_session(session_key)
+{_ind}        if _pc is not None:
+{_ind}            _raw = (event.text or "").strip()
+{_ind}            if _raw and not _raw.startswith("/"):
+{_ind}                _clarify_mod2.resolve_gateway_clarify(_pc.clarify_id, _raw)
+{_ind}                logger.info(
+{_ind}                    "Gateway intercepted clarify at session guard "
+{_ind}                    "(session=%s, clarify_id=%s)",
+{_ind}                    session_key, _pc.clarify_id,
+{_ind}                )
+{_ind}                return None  # consumed by clarify — no new turn
+{_ind}    except Exception:
+{_ind}        pass
+        self._cache_session_source(session_key, source)"""
+
+if old in content and "Gateway intercepted clarify at session guard" not in content:
     content = content.replace(old, new, 1)
     with open(file_path, 'w') as f:
         f.write(content)
