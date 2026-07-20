@@ -41,15 +41,19 @@
 #     ❌ stream fallback 丢失 reply_to → 已迁至主脚本 hermes-patches.sh（平台通用修复）
 #
 #   版本感知：
-#     最后验证: 2026-07-19
-#     Hermes 版本: v2026.7.7.2-1264-gb1fc653081 (origin/main=581e92e42)
+#     最后验证: 2026-07-20
+#     Hermes 版本: v2026.7.7.2-1653-g8f33e39682 (origin/main=8f33e39682)
 #     验证方式: 双重验证（check_pattern + old_string match）
-#     上游变更：P5 所在地新增 Feishu if/else 分支，但 old_string 缩进不变
+#     上游变更：
+#       P3 — 上游移除「Preserve original session source」注释块 +
+#       _get_cached_session_source guard，改为无条件 _cache_session_source。
+#       old_string 已重写为最小锚点（仅 _cache_session_source +
+#       _is_telegram_topic_lane 两行）。
 #
-#   已验证（v2026.7.7.2 / origin:main=581e92e42）：
+#   已验证（v2026.7.7.2-1653 / origin:main=8f33e39682）：
 #     P1. run.py (工具进度 Thread)     — ❌ 未合入，old_string ✅ 仍匹配
 #     P2. run.py (Clarify Session)    — ❌ 未合入，old_string ✅ 仍匹配
-#     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 仍匹配
+#     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 已重写
 #     P4. run.py (Session 串台去重)    — ❌ 未合入，old_string ✅ 仍匹配
 #     P5. run.py (Status 路由)        — ❌ 未合入，old_string ✅ 仍匹配
 #
@@ -212,11 +216,10 @@ PYEOF
 # 等待用户回复时，新消息会因为找不到 agent（_quick_key 不匹配）
 # 而触发新的 Session 创建，导致并发重复 Session。
 #
-# 上游 v2026.7.1 移除了 _get_cached_session_source guard（改为无条件
-# 覆盖 session source）。v2026.7.7 上游引入 async_session_store 异步化，
-# get_or_create_session 与 _cache_session_source 之间插入 ~40 行
-# pinned_session_id 逻辑。old_string 已适配为最小锚点策略——
-# 仅匹配 guard + cache + topic_lane 三行。
+# 上游 v2026.7.7.2-1653 (8f33e39682) 完全移除了「Preserve original session
+# source」注释块和 _get_cached_session_source guard，改为无条件调用
+# _cache_session_source。old_string 已适配为新的最小锚点——
+# 仅匹配 _cache_session_source + _is_telegram_topic_lane 两行。
 #
 # 修复：在 session 创建前多加一道 canonical key 的 Clarify 检查。
 
@@ -229,21 +232,10 @@ file_path = sys.argv[1]
 with open(file_path, 'r') as f:
     content = f.read()
 
-old = """        # Preserve original session source on resume — don't overwrite with
-        # interrupting event's metadata.  This prevents cross-thread routing
-        # when an inbound message from a different thread interrupts a running
-        # agent and causes the session to restart with wrong thread_id/message_id.
-        if not self._get_cached_session_source(session_key):
-            self._cache_session_source(session_key, source)
+old = """        self._cache_session_source(session_key, source)
         if await asyncio.to_thread(self._is_telegram_topic_lane, source):"""
 
-new = """        # Preserve original session source on resume — don't overwrite with
-        # interrupting event's metadata.  This prevents cross-thread routing
-        # when an inbound message from a different thread interrupts a running
-        # agent and causes the session to restart with wrong thread_id/message_id.
-        if not self._get_cached_session_source(session_key):
-            self._cache_session_source(session_key, source)
-        # Belt-and-suspenders clarify check using the canonical session
+new = """        # Belt-and-suspenders clarify check using the canonical session
         # key.  When _quick_key != session_key and no agent is found in
         # _running_agents under _quick_key, intercept the message before
         # a new Session spawns.
@@ -263,6 +255,7 @@ new = """        # Preserve original session source on resume — don't overwrit
                         return None  # consumed by clarify — no new turn
             except Exception:
                 pass
+        self._cache_session_source(session_key, source)
         if await asyncio.to_thread(self._is_telegram_topic_lane, source):"""
 
 if old in content:
