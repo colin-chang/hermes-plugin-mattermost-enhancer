@@ -816,6 +816,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
         allow_permanent: bool = True,
+        allow_session: bool = True,
         smart_denied: bool = False,
     ) -> SendResult:
         """发送按钮式审批提示到用户 DM.
@@ -826,6 +827,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
 
         Args:
             allow_permanent: True → 显示 "Always Allow" 永久授权按钮
+            allow_session: True → 显示 "Allow Session" 按钮
             smart_denied: True → 追加 owner override 提示（仅本次生效）
         """
         if smart_denied:
@@ -872,7 +874,10 @@ class MattermostApprovalAdapter(MattermostAdapter):
                         },
                     },
                 },
-                {
+            ]
+            # ── Session 授权按钮（allow_session=True 时显示）──
+            if allow_session:
+                base_actions.append({
                     "id": "approvesession",
                     "name": "Allow Session",
                     "type": "button",
@@ -884,8 +889,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                             "command": command,
                         },
                     },
-                },
-            ]
+                })
             # ── 永久授权按钮（仅 allow_permanent=True 时显示）──
             if allow_permanent and not smart_denied:
                 base_actions.append({

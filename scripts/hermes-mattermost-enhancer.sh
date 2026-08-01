@@ -15,7 +15,7 @@
 #   ✅ WebSocket 心跳 30s→15s — 覆写 _ws_connect_and_listen()
 #   ✅ _api_put 缺少 timeout — 覆写 edit_message() 自实现 HTTP PUT
 #
-# 活跃 patch（当前 5 个）：
+#   活跃 patch（当前 4 个）：
 #   P1. 工具进度消息进 Thread（gateway/run.py）
 #       上游 v0.14.0 修复不完整 — 要求 thread_id 但 Mattermost
 #       Channel-root 消息 source.thread_id 为 None。
@@ -29,11 +29,10 @@
 #   P4. Session 串台修复（gateway/run.py）
 #       Gateway 重启后同 channel 多 Thread auto-resume 时
 #       响应串到错误的 Thread。
-#   P5. Status 消息 Thread 路由修复（gateway/run.py）
-#       上游 v2026.6.5-1117 引入了 _resolve_progress_thread_id()
-#       修复了 _progress_thread_id，但 _status_thread_metadata 未同步：
-#       _thread_metadata_for_source 在 channel-root 时返回 None，
-#       导致 Clarify 卡片和 Working... 状态落入频道。
+#
+#   已移除：
+#     ❌ P5 Status 路由 → 上游 v2026.7.30 重构 _status_thread_metadata，
+#       引入 _thread_metadata_for_target 降级路径，功能等价实现。
 #
 #   已消除：
 #     ❌ 评论→正文合并              → 已迁至主脚本 hermes-patches.sh（平台通用修复）
@@ -41,21 +40,20 @@
 #     ❌ stream fallback 丢失 reply_to → 已迁至主脚本 hermes-patches.sh（平台通用修复）
 #
 #   版本感知：
-#     最后验证: 2026-07-20
-#     Hermes 版本: v2026.7.7.2-1653-g8f33e39682 (origin/main=8f33e39682)
+#     最后验证: 2026-08-01
+#     Hermes 版本: v2026.7.30-314-ge078c8c6ef (origin/main=e078c8c6ef)
 #     验证方式: 双重验证（check_pattern + old_string match）
 #     上游变更：
-#       P3 — 上游移除「Preserve original session source」注释块 +
-#       _get_cached_session_source guard，改为无条件 _cache_session_source。
-#       old_string 已重写为最小锚点（仅 _cache_session_source +
-#       _is_telegram_topic_lane 两行）。
+#       P5 — 上游重构 _status_thread_metadata 逻辑区，引入
+#       _thread_metadata_for_target 降级路径。对于 Mattermost
+#       channel-root 场景，新代码构造 {"thread_id": _progress_thread_id}
+#       — 与 P5 的 fallback 修复功能等价。P5 已移除。
 #
-#   已验证（v2026.7.7.2-1653 / origin:main=8f33e39682）：
+#   已验证（v2026.7.30-314 / origin:main=e078c8c6ef）：
 #     P1. run.py (工具进度 Thread)     — ❌ 未合入，old_string ✅ 仍匹配
 #     P2. run.py (Clarify Session)    — ❌ 未合入，old_string ✅ 仍匹配
-#     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 已重写
+#     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 仍匹配
 #     P4. run.py (Session 串台去重)    — ❌ 未合入，old_string ✅ 仍匹配
-#     P5. run.py (Status 路由)        — ❌ 未合入，old_string ✅ 仍匹配
 #
 # 使用方法：
 #   ./scripts/hermes-mattermost-enhancer.sh check   # 检查状态
@@ -377,45 +375,6 @@ else:
 PYEOF
 }
 
-# ── P5: _status_thread_metadata Thread 路由 ────────────────────────────
-#
-# 上游 v2026.6.5-1117 引入了 _resolve_progress_thread_id() 正确设置
-# _progress_thread_id（Part A 已合入）。但 _status_thread_metadata 仍有问题：
-# _thread_metadata_for_source 在 channel-root 时返回 None（因为
-# source.thread_id=None），导致 Clarify 卡片和 Working... 状态落入频道。
-#
-# 修复：_thread_metadata_for_source 返回 None 时降级为手动构造 metadata。
-
-patch_progress_metadata() {
-    _do_patch "gateway/run.py" \
-        "Fix: clarify cards + status messages leak to channel（修复「Clarify + Working 状态落入频道」的问题）" \
-        'Fallback: use _progress_thread_id when thread_metadata returns None' <<'PYEOF'
-import sys
-file_path = sys.argv[1]
-with open(file_path, 'r') as f:
-    content = f.read()
-
-old = "            _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None"
-
-new = """            _status_thread_metadata = (
-                (
-                    self._thread_metadata_for_source(source, event_message_id)
-                    # Fallback: use _progress_thread_id when thread_metadata returns None
-                    or {"thread_id": _progress_thread_id}
-                )
-                if _progress_thread_id else None
-            )"""
-
-if old in content:
-    content = content.replace(old, new)
-    with open(file_path, 'w') as f:
-        f.write(content)
-    print("APPLIED")
-else:
-    print("SKIP")
-PYEOF
-}
-
 # ── 状态检查 ──────────────────────────────────────────────────────────────
 
 check_status() {
@@ -431,7 +390,7 @@ check_status() {
     info "Edit message timeout 30s — adapter override（编辑消息 30 秒超时）"
     echo ""
 
-    local ok_count=0 total=5
+    local ok_count=0 total=4
 
     # P1
     if grep -q 'or source.platform == Platform.MATTERMOST' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
@@ -463,14 +422,6 @@ check_status() {
         ok_count=$((ok_count + 1))
     else
         warn "Fix: auto-resume session leaking into wrong thread（修复「Gateway重启后 session 串台」的问题）"
-    fi
-
-    # P5
-    if grep -q 'Fallback: use _progress_thread_id when thread_metadata returns None' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
-        ok "Fix: clarify cards + status messages leak to channel（修复「Clarify + Working 状态落入频道」的问题）"
-        ok_count=$((ok_count + 1))
-    else
-        warn "Fix: clarify cards + status messages leak to channel（修复「Clarify + Working 状态落入频道」的问题）"
     fi
 
     echo ""
@@ -511,7 +462,6 @@ apply_all() {
     patch_clarify_session
     patch_clarify_guard
     patch_session_dedup
-    patch_progress_metadata
     echo ""
     ok "Patches applied!（补丁完成！）"
     echo ""
