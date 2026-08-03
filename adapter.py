@@ -620,6 +620,13 @@ class MattermostApprovalAdapter(MattermostAdapter):
                     },
                 }
 
+            # 恢复原始 Topic 的 typing 指示器
+            # slash_commands.py 中 /approve 和 /deny 命令会自动恢复 typing，
+            # 但 DM 按钮回调路径不会 — 需要从按钮 context 取出原始 chat_id 手动恢复。
+            source_chat_id = context.get("chat_id", "")
+            if source_chat_id:
+                self.resume_typing_for_chat(source_chat_id)
+
             label_map = {
                 "once": "✅ Approved — Allow Once",
                 "session": "✅ Approved — Allow Session",
@@ -871,6 +878,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                             "action": "approve_once",
                             "session_key": session_key,
                             "command": command,
+                            "chat_id": chat_id,
                         },
                     },
                 },
@@ -887,6 +895,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                             "action": "approve_session",
                             "session_key": session_key,
                             "command": command,
+                            "chat_id": chat_id,
                         },
                     },
                 })
@@ -902,6 +911,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                             "action": "approve_always",
                             "session_key": session_key,
                             "command": command,
+                            "chat_id": chat_id,
                         },
                     },
                 })
@@ -915,6 +925,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                     "context": {
                         "action": "deny",
                         "session_key": session_key,
+                        "chat_id": chat_id,
                     },
                 },
             })
