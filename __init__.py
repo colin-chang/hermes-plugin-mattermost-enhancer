@@ -27,6 +27,7 @@ def register(ctx):
         _is_connected,
         _standalone_send,
         interactive_setup,
+        validate_mattermost_config,
         MAX_POST_LENGTH,
     )
 
@@ -35,6 +36,7 @@ def register(ctx):
         label="Mattermost (Approval)",
         adapter_factory=lambda cfg: MattermostApprovalAdapter(cfg),
         check_fn=check_mattermost_requirements,
+        validate_config=validate_mattermost_config,
         is_connected=_is_connected,
         required_env=[
             "MATTERMOST_URL",

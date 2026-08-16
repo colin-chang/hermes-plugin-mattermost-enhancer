@@ -15,10 +15,7 @@
 #   ✅ WebSocket 心跳 30s→15s — 覆写 _ws_connect_and_listen()
 #   ✅ _api_put 缺少 timeout — 覆写 edit_message() 自实现 HTTP PUT
 #
-#   活跃 patch（当前 4 个）：
-#   P1. 工具进度消息进 Thread（gateway/run.py）
-#       上游 v0.14.0 修复不完整 — 要求 thread_id 但 Mattermost
-#       Channel-root 消息 source.thread_id 为 None。
+#   活跃 patch（当前 3 个）：
 #   P2. Clarify Session 分裂修复（gateway/run.py）
 #       Mattermost Thread 模型下 thread_sessions_per_user 配置
 #       导致 _quick_key ≠ canonical session key，Clarify 响应发到
@@ -31,6 +28,10 @@
 #       响应串到错误的 Thread。
 #
 #   已移除：
+#     ❌ P1 工具进度进 Thread → 上游 _handle_ws_event 已对 thread 模式
+#       channel-root 帖子置 thread_id=post_id，配合 _resolve_progress_thread_id
+#       + _progress_metadata + adapter send() 的 metadata.thread_id fallback，
+#       进度消息已正确进 Thread（前提失效 + old_string 断裂，移除）。
 #     ❌ P5 Status 路由 → 上游 v2026.7.30 重构 _status_thread_metadata，
 #       引入 _thread_metadata_for_target 降级路径，功能等价实现。
 #
@@ -40,20 +41,20 @@
 #     ❌ stream fallback 丢失 reply_to → 已迁至主脚本 hermes-patches.sh（平台通用修复）
 #
 #   版本感知：
-#     最后验证: 2026-08-01
-#     Hermes 版本: v2026.7.30-314-ge078c8c6ef (origin/main=e078c8c6ef)
+#     最后验证: 2026-08-16
+#     Hermes 版本: v2026.8.13-834-gb2369172ad (origin/main=b2369172ad)
 #     验证方式: 双重验证（check_pattern + old_string match）
 #     上游变更：
-#       P5 — 上游重构 _status_thread_metadata 逻辑区，引入
-#       _thread_metadata_for_target 降级路径。对于 Mattermost
-#       channel-root 场景，新代码构造 {"thread_id": _progress_thread_id}
-#       — 与 P5 的 fallback 修复功能等价。P5 已移除。
+#       P1 — 上游 _progress_reply_to 重构为多行括号 + _relay_prospective_thread_id，
+#       且 _handle_ws_event 已对 channel-root 置 thread_id=post_id，前提失效，移除。
+#       P4 — 上游 _restart_loop_guard_config 返回 3 元组 + check_and_record
+#       多行调用（max_gap_seconds），old_string 断裂，改用最小锚点重写。
 #
-#   已验证（v2026.7.30-314 / origin:main=e078c8c6ef）：
-#     P1. run.py (工具进度 Thread)     — ❌ 未合入，old_string ✅ 仍匹配
-#     P2. run.py (Clarify Session)    — ❌ 未合入，old_string ✅ 仍匹配
+#   已验证（v2026.8.13-834 / origin:main=b2369172ad）：
+#     P1. run.py (工具进度 Thread)     — ✅ 前提失效 + old_string 断裂，移除
+#     P2. run.py (Clarify Session)    — ❌ 未合入，old_string ✅ 仍匹配，改用 async_session_store
 #     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 仍匹配
-#     P4. run.py (Session 串台去重)    — ❌ 未合入，old_string ✅ 仍匹配
+#     P4. run.py (Session 串台去重)    — ❌ 未合入，old_string ✅ 重写（最小锚点 Defense-3 注释）
 #
 # 使用方法：
 #   ./scripts/hermes-mattermost-enhancer.sh check   # 检查状态
@@ -112,49 +113,6 @@ _do_patch() {
     return $rc
 }
 
-# ── P1: 工具进度消息进 Thread ───────────────────────────────────────────
-#
-# 上游 v0.14.0 修复了 Mattermost 进度消息的 Thread 路由，但不完整：
-#   `source.platform in (FEISHU, MATTERMOST) and source.thread_id`
-# 要求必须有 thread_id。但 auto-resume 后的第一条消息还没有 thread_id，
-# 此时进度消息会跑回主频道。
-#
-# 修复：拆成 or 分支 — 只要 platform == MATTERMOST 就绑定 reply_to。
-
-patch_progress_thread() {
-    _do_patch "gateway/run.py" \
-        "Fix: task progress leaking to channel（修复「任务进度跑到频道里」的问题）" \
-        'or source.platform == Platform.MATTERMOST' <<'PYEOF'
-import sys
-file_path = sys.argv[1]
-with open(file_path, 'r') as f:
-    content = f.read()
-
-old = """        _progress_reply_to = (
-            event_message_id
-            if source.platform in (Platform.FEISHU, Platform.MATTERMOST) and source.thread_id and event_message_id
-            else None
-        )"""
-
-new = """        _progress_reply_to = (
-            event_message_id
-            if (
-                (source.platform == Platform.FEISHU and source.thread_id)
-                or source.platform == Platform.MATTERMOST
-            ) and event_message_id
-            else None
-        )"""
-
-if old in content:
-    content = content.replace(old, new)
-    with open(file_path, 'w') as f:
-        f.write(content)
-    print("APPLIED")
-else:
-    print("SKIP")
-PYEOF
-}
-
 # ── P2: Clarify Session 分裂修复 ────────────────────────────────────────
 #
 # Mattermost Thread 模型下，thread_sessions_per_user 配置会导致
@@ -165,7 +123,7 @@ PYEOF
 patch_clarify_session() {
     _do_patch "gateway/run.py" \
         "Fix: clarify session split causing AI amnesia（修复「Clarify 打断导致 AI 失忆」的问题）" \
-        '_canonical_entry = self.session_store.get_or_create_session' <<'PYEOF'
+        '_canonical_entry = await self.async_session_store.get_or_create_session' <<'PYEOF'
 import sys
 file_path = sys.argv[1]
 with open(file_path, 'r') as f:
@@ -187,7 +145,7 @@ new = '''            _pending_clarify = _clarify_mod.get_pending_for_session(
             # Telegram topic mode lobby.
             if _pending_clarify is None and source.thread_id:
                 try:
-                    _canonical_entry = self.session_store.get_or_create_session(source)
+                    _canonical_entry = await self.async_session_store.get_or_create_session(source)
                     _canonical_key = _canonical_entry.session_key
                     if _canonical_key != _quick_key:
                         _pending_clarify = _clarify_mod.get_pending_for_session(
@@ -293,37 +251,9 @@ file_path = sys.argv[1]
 with open(file_path, "r") as f:
     content = f.read()
 
-old = """        except Exception as exc:
-            logger.warning("Failed to enumerate resume-pending sessions: %s", exc)
-            return 0
+old = """        # Defense-3 (#30719): break the SIGTERM-respawn loop. Only count this"""
 
-        # Defense-3 (#30719): break the SIGTERM-respawn loop. Only count this
-        # boot when there are restart-interrupted sessions to resume — a clean
-        # boot must not accrue toward the breaker. If too many such boots have
-        # happened in the configured window, skip auto-resume for THIS boot:
-        # the gateway still comes up and serves real inbound messages, it just
-        # stops replaying the session that keeps killing it. The session stays
-        # resume_pending, so a real user message can still continue it (a human
-        # is now in the loop). Defenses 1-2 cover the cron/CLI/terminal paths;
-        # this catches every other SIGTERM source (e.g. a raw `terminal(
-        # "launchctl kickstart ai.hermes.gateway")`).
-        if candidates:
-            try:
-                from gateway import restart_loop_guard as _rlg
-
-                _max_restarts, _window = self._restart_loop_guard_config()
-                if _rlg.check_and_record(_max_restarts, _window):
-                    return 0
-            except Exception as exc:  # noqa: BLE001 — breaker must fail OPEN
-                logger.debug("Restart-loop guard check skipped: %s", exc)
-
-        now = datetime.now()"""
-
-new = """        except Exception as exc:
-            logger.warning("Failed to enumerate resume-pending sessions: %s", exc)
-            return 0
-
-        # Deduplicate: keep only the most recent session per (platform, chat_id).
+new = """        # Deduplicate: keep only the most recent session per (platform, chat_id).
         # When multiple threads in the same channel are auto-resumed
         # simultaneously (e.g. after a gateway crash), responses from one
         # thread can leak into another — the user sees a message about
@@ -343,27 +273,7 @@ new = """        except Exception as exc:
                 _per_chat[key] = entry
         candidates = list(_per_chat.values())
 
-        # Defense-3 (#30719): break the SIGTERM-respawn loop. Only count this
-        # boot when there are restart-interrupted sessions to resume — a clean
-        # boot must not accrue toward the breaker. If too many such boots have
-        # happened in the configured window, skip auto-resume for THIS boot:
-        # the gateway still comes up and serves real inbound messages, it just
-        # stops replaying the session that keeps killing it. The session stays
-        # resume_pending, so a real user message can still continue it (a human
-        # is now in the loop). Defenses 1-2 cover the cron/CLI/terminal paths;
-        # this catches every other SIGTERM source (e.g. a raw `terminal(
-        # "launchctl kickstart ai.hermes.gateway")`).
-        if candidates:
-            try:
-                from gateway import restart_loop_guard as _rlg
-
-                _max_restarts, _window = self._restart_loop_guard_config()
-                if _rlg.check_and_record(_max_restarts, _window):
-                    return 0
-            except Exception as exc:  # noqa: BLE001 — breaker must fail OPEN
-                logger.debug("Restart-loop guard check skipped: %s", exc)
-
-        now = datetime.now()"""
+        # Defense-3 (#30719): break the SIGTERM-respawn loop. Only count this"""
 
 if old in content:
     content = content.replace(old, new)
@@ -390,18 +300,10 @@ check_status() {
     info "Edit message timeout 30s — adapter override（编辑消息 30 秒超时）"
     echo ""
 
-    local ok_count=0 total=4
-
-    # P1
-    if grep -q 'or source.platform == Platform.MATTERMOST' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
-        ok "Fix: task progress leaking to channel（修复「任务进度跑到频道里」的问题）"
-        ok_count=$((ok_count + 1))
-    else
-        warn "Fix: task progress leaking to channel（修复「任务进度跑到频道里」的问题）"
-    fi
+    local ok_count=0 total=3
 
     # P2
-    if grep -q '_canonical_entry = self.session_store.get_or_create_session' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
+    if grep -q '_canonical_entry = await self.async_session_store.get_or_create_session' "${AGENT_DIR}/gateway/run.py" 2>/dev/null; then
         ok "Fix: clarify session split causing AI amnesia（修复「Clarify 打断导致 AI 失忆」的问题）"
         ok_count=$((ok_count + 1))
     else
@@ -458,7 +360,6 @@ restart_gateway() {
 apply_all() {
     info "Fixing issues with Hermes in Mattermost...（正在修复 Mattermost 相关问题...）"
     echo ""
-    patch_progress_thread
     patch_clarify_session
     patch_clarify_guard
     patch_session_dedup
