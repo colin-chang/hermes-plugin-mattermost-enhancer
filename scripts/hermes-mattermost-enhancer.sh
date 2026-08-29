@@ -41,20 +41,25 @@
 #     ❌ stream fallback 丢失 reply_to → 已迁至主脚本 hermes-patches.sh（平台通用修复）
 #
 #   版本感知：
-#     最后验证: 2026-08-16
-#     Hermes 版本: v2026.8.13-834-gb2369172ad (origin/main=b2369172ad)
+#     最后验证: 2026-08-29
+#     Hermes 版本: v2026.8.27-389-gd5632392c7 (origin/main=d5632392c7)
 #     验证方式: 双重验证（check_pattern + old_string match）
-#     上游变更：
-#       P1 — 上游 _progress_reply_to 重构为多行括号 + _relay_prospective_thread_id，
-#       且 _handle_ws_event 已对 channel-root 置 thread_id=post_id，前提失效，移除。
-#       P4 — 上游 _restart_loop_guard_config 返回 3 元组 + check_and_record
-#       多行调用（max_gap_seconds），old_string 断裂，改用最小锚点重写。
+#     上游变更（v2026.8.13 → v2026.8.27）：
+#       bundled mattermost adapter 仅 +2 行 — connect() 末尾新增
+#       self._wire_plugin_handlers(None)；enhancer 的 connect() 覆写
+#       已调用 super().connect()，自动继承，无需改动。
+#       base.py 新增 _wire_plugin_handlers / set_owner_profile /
+#       _session_key_profile；validate_media_delivery_path /
+#       filter_media_delivery_paths / filter_local_delivery_paths 增加
+#       session_key 参数 —— enhancer 未覆写这些方法，无影响。
+#       _session_model_overrides 迁移至 SessionState，经 legacy_dict_property
+#       暴露为 SessionFieldView(MutableMapping) —— enhancer 的 .get()/[]/in
+#       字典式访问仍正常。
 #
-#   已验证（v2026.8.13-834 / origin:main=b2369172ad）：
-#     P1. run.py (工具进度 Thread)     — ✅ 前提失效 + old_string 断裂，移除
+#   已验证（v2026.8.27-389 / origin:main=d5632392c7）：
 #     P2. run.py (Clarify Session)    — ❌ 未合入，old_string ✅ 仍匹配，改用 async_session_store
-#     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 仍匹配
-#     P4. run.py (Session 串台去重)    — ❌ 未合入，old_string ✅ 重写（最小锚点 Defense-3 注释）
+#     P3. run.py (Clarify 并发守护)    — ❌ 未合入，old_string ✅ 仍匹配（anchor _cache_session_source）
+#     P4. run.py (Session 串台去重)    — ❌ 未合入，old_string ✅ 仍匹配（最小锚点 Defense-3 注释）
 #
 # 使用方法：
 #   ./scripts/hermes-mattermost-enhancer.sh check   # 检查状态
