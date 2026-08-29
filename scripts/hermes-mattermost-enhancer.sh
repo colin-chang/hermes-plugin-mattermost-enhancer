@@ -176,7 +176,7 @@ PYEOF
 # source」注释块和 _get_cached_session_source guard，改为无条件调用
 # _cache_session_source。
 #
-# v2026.7.7.5: 自适应缩进 — 运行时检测 hermes-patches.sh P60a 守卫是否存在，
+# v2026.7.7.5: 自适应缩进 — 运行时检测 hermes-patches.sh P4 守卫是否存在，
 # 自动选择 12sp（守卫内）或 8sp（无守卫），兼容独立安装和联合使用两种场景。
 # old_string 使用 \n 前缀防止 12sp/8sp 子串误匹配。
 #
@@ -191,14 +191,14 @@ file_path = sys.argv[1]
 with open(file_path, 'r') as f:
     content = f.read()
 
-# P60a guard (from hermes-patches.sh) may wrap this region with an
+# P4 guard (from hermes-patches.sh) may wrap this region with an
 # additional `if not self._get_cached_session_source` at 8-space.
 # When present, our clarify check must sit at 12-space inside the guard;
 # _cache_session_source stays at 8-space outside (matching Colin's fix).
-_p60a_guard = "if not self._get_cached_session_source(session_key):" in content
-_ind = "            " if _p60a_guard else "        "  # 12sp vs 8sp
+_p4_guard = "if not self._get_cached_session_source(session_key):" in content
+_ind = "            " if _p4_guard else "        "  # 12sp vs 8sp
 
-# old_string adapts to P60a guard presence: matches the 12sp guarded
+# old_string adapts to P4 guard presence: matches the 12sp guarded
 # copy when guard exists, the 8sp original otherwise.  \n prefix
 # prevents false substring matches across indent levels.
 old = f"\n{_ind}self._cache_session_source(session_key, source)"
