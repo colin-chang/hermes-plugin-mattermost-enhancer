@@ -109,6 +109,16 @@ class MattermostApprovalAdapter(MattermostAdapter):
         # Footer 追踪: chat_id → (post_id, content)
         # runtime footer 不独立发帖，而是编辑上一条消息追加到末尾
         self._tracked_posts: Dict[str, Tuple[str, str]] = {}
+        # 回调去重: "{post_id}:{action}" → True（防双击重复处理）
+        # 独立回调线程可并发处理多请求，去重读写需线程锁
+        self._callback_dedup: Dict[str, bool] = {}
+        import threading as _threading
+        self._dedup_lock = _threading.Lock()
+        # 独立回调线程的 loop/thread（由 _start_callback_server 填充）
+        self._callback_loop = None
+        self._callback_thread = None
+        # gateway 主事件循环引用（由 _start_callback_server 填充，followup 使用）
+        self._gateway_main_loop = None
 
     # ══════════════════════════════════════════════════════════════════════
     # 公共辅助方法
@@ -172,17 +182,71 @@ class MattermostApprovalAdapter(MattermostAdapter):
         return None
 
     # ══════════════════════════════════════════════════════════════════════
-    # 回调服务器（多路由）
+    # 回调服务器（多路由）— 独立线程 + 独立事件循环
+    # ══════════════════════════════════════════════════════════════════════
+    #
+    # 为什么回调服务器必须跑在独立线程/独立 loop 上：
+    #   旧实现用 asyncio.start_server() 把回调协程挂在 gateway 主事件循环
+    #   上。agent 执行复杂操作时，主 loop 被流式 delta、消息编辑、心跳等
+    #   回调排满，按钮回调协程被饿死——用户点击后卡片长时间无反馈
+    #   （实测：MM 日志显示点击后 8.4s 才收到 update 响应），用户误以为
+    #   没点中而重复点击（MM 日志中存在 2ms 双击实录）。
+    #
+    #   独立线程 + 独立 loop 后：
+    #     1. HTTP 响应延迟与主 loop 负载彻底解耦（恒为毫秒级）；
+    #     2. 纯内存操作（审批/Clarify resolve，tools.approval /
+    #        tools.clarify_gateway 均为线程安全模块级状态）在回调线程
+    #        同步完成，HTTP 响应直接携带最终卡片状态；
+    #     3. 涉及网络/主 loop 状态的耗时操作（模型切换、会话重置、
+    #        Bot API 发帖）通过 followup 协程派回主 loop 后台执行，
+    #        HTTP 先返回「⏳ 已收到」并清空按钮，杜绝重复点击。
     # ══════════════════════════════════════════════════════════════════════
 
+    def _get_gateway_loop(self):
+        """获取 gateway 主事件循环（用于把耗时操作派回主 loop 执行）。
+
+        只返回真正的主 loop — 绝不能返回当前回调线程的 loop：
+        aiohttp.ClientSession 绑定在主 loop 上，跨 loop 使用是未定义行为。
+        """
+        loop = self._gateway_main_loop
+        if loop is not None and loop.is_running():
+            return loop
+        try:
+            from gateway.run import _gateway_runner_ref
+            runner = _gateway_runner_ref()
+            if runner is not None:
+                loop = getattr(runner, "_gateway_loop", None)
+                if loop is not None and loop.is_running():
+                    return loop
+        except Exception:
+            pass
+        return None
+
+    def _schedule_followup(self, coro) -> None:
+        """把耗时 followup 协程派回 gateway 主 loop 后台执行。
+
+        主 loop 不可用时降级为当前（回调）loop 的后台任务，
+        保证回调响应永远不被阻塞。
+        """
+        loop = self._get_gateway_loop()
+        if loop is not None:
+            asyncio.run_coroutine_threadsafe(coro, loop)
+        else:
+            asyncio.get_running_loop().create_task(coro)
+
     async def _start_callback_server(self) -> None:
-        """启动 HTTP callback server。
+        """启动 HTTP callback server（独立线程 + 独立事件循环）。
+
         路由：
-          POST /mattermost/callback → 按钮回调（审批 + 模型切换 + 会话重置）
+          POST /mattermost/callback → 按钮回调（审批 + 模型切换 + 会话重置 + Clarify）
           POST /mm-command          → Slash 指令（/model + /new）
         """
         import asyncio as _asyncio
+        import threading as _threading
+
         adapter_self = self
+        main_loop = _asyncio.get_running_loop()  # gateway 主 loop（供 followup 使用）
+        adapter_self._gateway_main_loop = main_loop
 
         async def _handler(reader: _asyncio.StreamReader, writer: _asyncio.StreamWriter):
             try:
@@ -240,14 +304,40 @@ class MattermostApprovalAdapter(MattermostAdapter):
                     pass
                 writer.close()
 
-        server = await _asyncio.start_server(
-            _handler, host=adapter_self._callback_bind, port=adapter_self._callback_port,
+        async def _serve() -> None:
+            server = await _asyncio.start_server(
+                _handler, host=adapter_self._callback_bind, port=adapter_self._callback_port,
+            )
+            adapter_self._callback_server = server
+            logger.info(
+                "MattermostApproval callback server on %s:%s "
+                "(routes: /mattermost/callback, /mm-command) — dedicated thread/loop",
+                adapter_self._callback_bind, adapter_self._callback_port,
+            )
+            async with server:
+                await server.serve_forever()
+
+        def _run_callback_loop() -> None:
+            loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(loop)
+            adapter_self._callback_loop = loop
+            try:
+                loop.run_until_complete(_serve())
+            except (_asyncio.CancelledError, KeyboardInterrupt):
+                pass  # 正常停机路径 — server 被主动关闭
+            except Exception:
+                if not getattr(adapter_self, "_closing", False):
+                    logger.exception("Callback server loop crashed")
+            finally:
+                loop.close()
+
+        thread = _threading.Thread(
+            target=_run_callback_loop,
+            name="mm-callback-server",
+            daemon=True,
         )
-        adapter_self._callback_server = server
-        logger.info(
-            "MattermostApproval callback server on %s:%s (routes: /mattermost/callback, /mm-command)",
-            adapter_self._callback_bind, adapter_self._callback_port,
-        )
+        thread.start()
+        adapter_self._callback_thread = thread
 
     # ══════════════════════════════════════════════════════════════════════
     # 路由: Interactive Message 回调
@@ -283,6 +373,11 @@ class MattermostApprovalAdapter(MattermostAdapter):
           Slash Command 的 HTTP response 以用户身份显示 ephemeral（MM 设计限制）。
           为避免用户头像发送 Bot 消息的困惑，HTTP response 返回空 ephemeral，
           所有可见内容通过 Bot API 发帖。
+
+          响应解耦：卡片构建 + Bot API 发帖涉及多次网络往返（load_config、
+          get_chat_info、get_current_model...），全部作为 followup 派回
+          gateway 主 loop 后台执行，HTTP 立即返回空 ephemeral —
+          避免斜杠指令在 agent 繁忙时长时间无响应。
         """
         from urllib.parse import unquote_plus
         params: Dict[str, str] = {}
@@ -302,15 +397,21 @@ class MattermostApprovalAdapter(MattermostAdapter):
         logger.info("Slash command: /%s user=%s channel=%s root_id=%s",
                     command, user_id[:8], channel_id[:8], root_id or "(channel-level)")
 
-        # 校验权限
+        # 校验权限（纯内存，同步执行）
         allowed_users = self._get_allowed_users()
         if allowed_users and user_id not in allowed_users:
             return {"response_type": "ephemeral", "text": "⛔ Unauthorized"}
 
         if command == "model":
-            return await self._handle_model_command(channel_id, user_id, root_id)
+            self._schedule_followup(
+                self._handle_model_command(channel_id, user_id, root_id)
+            )
+            return {}
         elif command == "new":
-            return await self._handle_new_command(channel_id, user_id, root_id)
+            self._schedule_followup(
+                self._handle_new_command(channel_id, user_id, root_id)
+            )
+            return {}
 
         return {"response_type": "ephemeral", "text": f"Unknown command: /{command}"}
 
@@ -527,18 +628,50 @@ class MattermostApprovalAdapter(MattermostAdapter):
     # 回调处理（Interactive Message 按钮）
     # ══════════════════════════════════════════════════════════════════════
 
+    def _is_duplicate_click(self, payload: Dict[str, Any]) -> bool:
+        """post_id+action 去重 — 防双击（首次点击 False，重复点击 True）。
+
+        MM 日志曾录得 2ms 内双击实录：去重必须做在 HTTP 响应之前，
+        否则两个请求都会执行副作用并各自返回一次 update。
+        """
+        post_id = str(payload.get("post_id", ""))
+        action = str(payload.get("context", {}).get("action", ""))
+        if not post_id or not action:
+            return False
+        key = f"{post_id}:{action}"
+        with self._dedup_lock:
+            if key in self._callback_dedup:
+                logger.info("Duplicate click suppressed: %s", key)
+                return True
+            self._callback_dedup[key] = True
+            # 简单容量控制：超过 512 条清空（post 维度幂等，清空无害）
+            if len(self._callback_dedup) > 512:
+                self._callback_dedup.clear()
+                self._callback_dedup[key] = True
+        return False
+
     async def _handle_callback(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """处理按钮回调 — 审批 + 模型切换 + 会话重置 + Clarify。"""
+        """处理按钮回调 — 审批 + 模型切换 + 会话重置 + Clarify。
+
+        响应解耦原则：
+          1. 纯内存操作 → 同步完成后立即返回最终卡片状态；
+          2. 耗时操作（API 调用/主 loop 状态）→ 立即返回「⏳ 已收到」
+             清空按钮，耗时部分作为 followup 派回 gateway 主 loop 后台执行。
+        """
         context = payload.get("context", {})
         action = context.get("action", "")
 
+        # ── 双击去重（最先执行）──
+        if self._is_duplicate_click(payload):
+            return {"update": {"message": "✅ 已处理本次点击", "props": {}}}
+
         # ── Clarify 选择 ──
         if action == "cmd_clarify_choice":
-            return await self._handle_clarify_choice_callback(payload)
+            return self._handle_clarify_choice_callback(payload)
 
         # ── Clarify「其他」─→
         if action == "cmd_clarify_other":
-            return await self._handle_clarify_other_callback(payload)
+            return self._handle_clarify_other_callback(payload)
 
         # ── 模型切换 ──
         if action == "cmd_model_switch":
@@ -573,89 +706,63 @@ class MattermostApprovalAdapter(MattermostAdapter):
             return {"ephemeral_text": f"Unknown action: {action}"}
 
         # ── 并发点击防护：每个审批按 session_key 串行化 ──
-        # asyncio 回调服务器可以并发处理多个请求。用户快速双击时，
-        # 两个请求同时进入此方法，需用 Lock 串行化避免竞态。
-        # 并发请求直接返回"处理中"更新并清空按钮，防止用户继续点击。
-        import asyncio as _asyncio
-
-        if not hasattr(self, "_approval_locks"):
-            self._approval_locks: Dict[str, _asyncio.Lock] = {}
-
-        lock = self._approval_locks.get(session_key)
-        if not lock:
-            lock = _asyncio.Lock()
-            self._approval_locks[session_key] = lock
-
-        if lock.locked():
-            # 并发请求 — 另一个回调正在处理同一审批，快速返回
-            logger.info(
-                "Approval callback: concurrent click detected for session %s, "
-                "returning processing update",
-                session_key[:40],
-            )
+        # 回调服务器跑在独立线程，用户快速双击时两个请求并发进入。
+        # 第一层防护：_is_duplicate_click（post_id+action 去重，入口已做）。
+        # 第二层：resolve_gateway_approval 本身线程安全且幂等
+        # （count==0 表示已处理），此处只做结果标注。
+        count = resolve_gateway_approval(session_key, choice)
+        if count == 0:
+            # 审批已被处理（重复点击）— 仍然返回 update 清空卡片按钮
+            # 防止用户继续点击看到 "No pending approval found" 错误
             return {
                 "update": {
-                    "message": "⏳ 正在处理您的审批请求，请稍候...",
+                    "message": "⚠️ 此审批已处理",
                     "props": {
                         "attachments": [{
-                            "actions": [],  # 清空按钮，防止继续点击
+                            "actions": [],  # 清空按钮
                         }],
                     },
                 },
             }
 
-        async with lock:
-            count = resolve_gateway_approval(session_key, choice)
-            if count == 0:
-                # 审批已被处理（重复点击）— 仍然返回 update 清空卡片按钮
-                # 防止用户继续点击看到 "No pending approval found" 错误
-                return {
-                    "update": {
-                        "message": "⚠️ 此审批已处理",
-                        "props": {
-                            "attachments": [{
-                                "actions": [],  # 清空按钮
-                            }],
-                        },
-                    },
-                }
+        # 恢复原始 Topic 的 typing 指示器
+        # slash_commands.py 中 /approve 和 /deny 命令会自动恢复 typing，
+        # 但 DM 按钮回调路径不会 — 需要从按钮 context 取出原始 chat_id 手动恢复。
+        source_chat_id = context.get("chat_id", "")
+        if source_chat_id:
+            self.resume_typing_for_chat(source_chat_id)
 
-            # 恢复原始 Topic 的 typing 指示器
-            # slash_commands.py 中 /approve 和 /deny 命令会自动恢复 typing，
-            # 但 DM 按钮回调路径不会 — 需要从按钮 context 取出原始 chat_id 手动恢复。
-            source_chat_id = context.get("chat_id", "")
-            if source_chat_id:
-                self.resume_typing_for_chat(source_chat_id)
+        label_map = {
+            "once": "✅ Approved — Allow Once",
+            "session": "✅ Approved — Allow Session",
+            "always": "✅ Approved — Always Allow",
+            "deny": "❌ Denied",
+        }
+        cmd = context.get("command", "")
+        cmd_display = f"\n```\n{cmd}\n```" if cmd else ""
+        _update_msg = f"{label_map.get(choice, choice)}{cmd_display}"
 
-            label_map = {
-                "once": "✅ Approved — Allow Once",
-                "session": "✅ Approved — Allow Session",
-                "always": "✅ Approved — Always Allow",
-                "deny": "❌ Denied",
-            }
-            cmd = context.get("command", "")
-            cmd_display = f"\n```\n{cmd}\n```" if cmd else ""
-            _update_msg = f"{label_map.get(choice, choice)}{cmd_display}"
+        logger.info("Approval callback: %s → %s (session %s), %d resolved",
+                     action, choice, session_key[:40], count)
 
-            logger.info("Approval callback: %s → %s (session %s), %d resolved",
-                         action, choice, session_key[:40], count)
-
-            # update 响应替换卡片内容，同时清空 actions 防止重复点击
-            # MM 的 update 只替换 message+props，按钮仍在 — 必须在 props 中返回空 actions
-            return {
-                "update": {
-                    "message": _update_msg,
-                    "props": {
-                        "attachments": [{
-                            "actions": [],  # 清空按钮，防止 Deny 后重复点击
-                        }],
-                    },
+        # update 响应替换卡片内容，同时清空 actions 防止重复点击
+        # MM 的 update 只替换 message+props，按钮仍在 — 必须在 props 中返回空 actions
+        return {
+            "update": {
+                "message": _update_msg,
+                "props": {
+                    "attachments": [{
+                        "actions": [],  # 清空按钮，防止 Deny 后重复点击
+                    }],
                 },
-            }
+            },
+        }
 
     # ── Clarify 回调处理 ──
+    # 两个 clarify 回调均为纯内存操作（resolve/mark + 渲染），
+    # 同步执行、立即返回最终卡片状态 — 无需 followup。
 
-    async def _handle_clarify_choice_callback(
+    def _handle_clarify_choice_callback(
         self, payload: Dict[str, Any],
     ) -> Dict[str, Any]:
         """处理 Clarify 选项按钮回调。
@@ -694,7 +801,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
             },
         }
 
-    async def _handle_clarify_other_callback(
+    def _handle_clarify_other_callback(
         self, payload: Dict[str, Any],
     ) -> Dict[str, Any]:
         """处理 Clarify「其他」按钮回调。
@@ -728,7 +835,49 @@ class MattermostApprovalAdapter(MattermostAdapter):
             },
         }
 
-    # ── 模型切换回调 ──
+    # ── 模型切换回调（立即响应 + followup）──
+
+    async def _model_switch_followup(
+        self, session_key: str, model_id: str, provider_name: str,
+        channel_id: str, root_post_id: str,
+    ) -> None:
+        """模型切换的耗时收尾 — 在 gateway 主 loop 后台执行。
+
+        完成后用 Bot API 更新卡片为最终结果（成功/失败）。
+        不阻塞回调 HTTP 响应 — 用户点击后立刻收到过 ack。
+        """
+        old_model = self._get_current_model_from_key(session_key)
+        success, message = await self._switch_session_model(
+            session_key, model_id, provider_name,
+        )
+
+        if success:
+            old_display = old_model.split("/", 1)[-1] if "/" in old_model else old_model
+            new_display = model_id.split("/", 1)[-1] if "/" in model_id else model_id
+            update = {
+                "message": (
+                    f"✅ 模型已切换: {old_display or '(default)'} → {new_display}\n"
+                    f"💡 重新选择请输入 `/model`"
+                ),
+                "props": {},
+            }
+        else:
+            update = {"message": f"❌ 切换失败: {message}", "props": {}}
+
+        try:
+            await self._api_put(
+                f"posts/{root_post_id}/patch",
+                {"message": update.get("message", ""), "props": update.get("props", {})},
+            )
+        except Exception:
+            logger.error(
+                "Model switch followup: failed to patch post %s",
+                root_post_id, exc_info=True,
+            )
+        logger.info(
+            "Model switch followup done: session=%s model=%s success=%s",
+            session_key, model_id, success,
+        )
 
     async def _handle_model_switch_callback(
         self, payload: Dict[str, Any],
@@ -737,6 +886,9 @@ class MattermostApprovalAdapter(MattermostAdapter):
 
         Select 下拉列表：context 中包含 selected_option 字段（值为 option.value）
         Button 按钮：context 中包含 model_id 字段
+
+        响应解耦：HTTP 立即返回「⏳ 已收到」并清空按钮，实际切换 +
+        卡片最终更新作为 followup 派回 gateway 主 loop 后台执行。
         """
         context = payload.get("context", {})
 
@@ -745,6 +897,8 @@ class MattermostApprovalAdapter(MattermostAdapter):
         session_key = context.get("session_key", "")
         provider_name = context.get("provider_name", "")
         user_id = payload.get("user_id", "")
+        post_id = payload.get("post_id", "")
+        channel_id = payload.get("channel_id", "")
 
         logger.info(
             "Model switch callback: model=%s session=%s provider=%s",
@@ -763,34 +917,74 @@ class MattermostApprovalAdapter(MattermostAdapter):
             from .models import _resolve_provider_for_model
             provider_name = _resolve_provider_for_model(model_id)
 
-        # 获取旧模型名（用于显示切换路径）
-        old_model = self._get_current_model_from_key(session_key)
+        # 耗时部分派回主 loop 后台执行，HTTP 先 ack
+        if post_id:
+            self._schedule_followup(
+                self._model_switch_followup(
+                    session_key, model_id, provider_name, channel_id, post_id,
+                )
+            )
+            return {
+                "update": {
+                    "message": f"⏳ 正在切换到 {model_id}，请稍候...",
+                    "props": {},
+                },
+            }
 
+        # post_id 缺失（异常场景）— 降级为同步等待，保证功能不丢
+        old_model = self._get_current_model_from_key(session_key)
         success, message = await self._switch_session_model(
             session_key, model_id, provider_name,
         )
-
         if success:
             old_display = old_model.split("/", 1)[-1] if "/" in old_model else old_model
             new_display = model_id.split("/", 1)[-1] if "/" in model_id else model_id
             return {
                 "update": {
-                    "message": f"✅ 模型已切换: {old_display or '(default)'} → {new_display}\n💡 重新选择请输入 `/model`",
+                    "message": f"✅ 模型已切换: {old_display or '(default)'} → {new_display}",
                     "props": {},
                 },
             }
-        else:
-            return {"ephemeral_text": f"切换失败: {message}"}
+        return {"ephemeral_text": f"切换失败: {message}"}
 
-    # ── 会话重置回调 ──
+    # ── 会话重置回调（立即响应 + followup）──
+
+    async def _new_confirm_followup(
+        self, session_key: str, root_post_id: str,
+    ) -> None:
+        """会话重置的耗时收尾 — 在 gateway 主 loop 后台执行。"""
+        success, message = await self._reset_session(session_key)
+        update = (
+            {"message": "✅ 会话已重置，新会话已创建，对话上下文已清空。", "props": {}}
+            if success
+            else {"message": f"❌ 重置失败: {message}", "props": {}}
+        )
+        try:
+            await self._api_put(
+                f"posts/{root_post_id}/patch",
+                {"message": update.get("message", ""), "props": update.get("props", {})},
+            )
+        except Exception:
+            logger.error(
+                "New confirm followup: failed to patch post %s",
+                root_post_id, exc_info=True,
+            )
+        logger.info(
+            "New confirm followup done: session=%s success=%s", session_key, success,
+        )
 
     async def _handle_new_confirm_callback(
         self, payload: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """处理会话重置确认按钮回调。"""
+        """处理会话重置确认按钮回调。
+
+        响应解耦：HTTP 立即返回「⏳ 已收到」并清空按钮，实际重置 +
+        卡片最终更新作为 followup 派回 gateway 主 loop 后台执行。
+        """
         context = payload.get("context", {})
         session_key = context.get("session_key", "")
         user_id = payload.get("user_id", "")
+        post_id = payload.get("post_id", "")
 
         allowed_users = self._get_allowed_users()
         if allowed_users and user_id not in allowed_users:
@@ -799,8 +993,20 @@ class MattermostApprovalAdapter(MattermostAdapter):
         if not session_key:
             return {"ephemeral_text": "Missing session context"}
 
-        success, message = await self._reset_session(session_key)
+        # 耗时部分派回主 loop 后台执行，HTTP 先 ack
+        if post_id:
+            self._schedule_followup(
+                self._new_confirm_followup(session_key, post_id)
+            )
+            return {
+                "update": {
+                    "message": "⏳ 正在重置会话，请稍候...",
+                    "props": {},
+                },
+            }
 
+        # post_id 缺失（异常场景）— 降级为同步等待，保证功能不丢
+        success, message = await self._reset_session(session_key)
         if success:
             # 只在 message 中放内容，props 清空避免重复
             return {
@@ -809,8 +1015,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                     "props": {},
                 },
             }
-        else:
-            return {"ephemeral_text": f"重置失败: {message}"}
+        return {"ephemeral_text": f"重置失败: {message}"}
 
     # ── DM 审批发送 ──
 
@@ -1166,12 +1371,25 @@ class MattermostApprovalAdapter(MattermostAdapter):
     # ══════════════════════════════════════════════════════════════════════
 
     async def _stop_callback_server(self) -> None:
-        """停止 callback server."""
-        if self._callback_server:
-            self._callback_server.close()
-            await self._callback_server.wait_closed()
-            self._callback_server = None
-            logger.info("Mattermost callback server stopped")
+        """停止 callback server（独立线程 + 独立 loop）."""
+        server = self._callback_server
+        loop = self._callback_loop
+        if server is not None and loop is not None and loop.is_running():
+            # 从外部线程安全地请求关闭独立 loop 中的 server
+            async def _shutdown(srv):
+                srv.close()
+                await srv.wait_closed()
+            fut = asyncio.run_coroutine_threadsafe(_shutdown(server), loop)
+            try:
+                await asyncio.wrap_future(fut)
+            except Exception:
+                logger.debug("Callback server shutdown raced with loop close", exc_info=True)
+        self._callback_server = None
+        self._callback_loop = None
+        if self._callback_thread is not None:
+            self._callback_thread.join(timeout=5.0)
+            self._callback_thread = None
+        logger.info("Mattermost callback server stopped")
 
     def _verify_signature(self, body: bytes, signature: str) -> bool:
         """HMAC-SHA256 校验 Mattermost 回调签名."""
@@ -1263,14 +1481,13 @@ class MattermostApprovalAdapter(MattermostAdapter):
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Mattermost — 覆写父类，追加回调服务器启动."""
-        import asyncio
-
         # 先调用内置 connect（认证 + WebSocket）
         result = await super().connect(is_reconnect=is_reconnect)
         if not result:
             return False
 
-        # 启动审批 + Slash 指令回调服务器
+        # 启动审批 + Slash 指令回调服务器（独立线程，fire-and-forget；
+        # 端口冲突等启动失败由 _run_callback_loop 内部记录日志）
         await self._start_callback_server()
         return True
 
