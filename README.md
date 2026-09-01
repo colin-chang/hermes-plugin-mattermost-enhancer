@@ -106,7 +106,7 @@ After confirming:
 
 ![AI question interactive card](images/clarify.webp)
 
-- Click an option button → takes effect immediately, card updates to confirmed ✅
+- Click an option button → takes effect immediately; the card updates in place, keeping the original question and all options (✅ marks your pick) so history stays reviewable
 - Click "✍️ Other" → card prompts "Type your answer below" — just type in the chat
 - Open-ended questions (no choices) → shows the question text, just type your answer
 

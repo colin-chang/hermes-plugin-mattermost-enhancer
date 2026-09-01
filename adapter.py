@@ -739,8 +739,10 @@ class MattermostApprovalAdapter(MattermostAdapter):
             "deny": "❌ Denied",
         }
         cmd = context.get("command", "")
+        reason = context.get("reason", "")
         cmd_display = f"\n```\n{cmd}\n```" if cmd else ""
-        _update_msg = f"{label_map.get(choice, choice)}{cmd_display}"
+        reason_display = f"\n**Reason:** {reason}" if reason else ""
+        _update_msg = f"{label_map.get(choice, choice)}{reason_display}{cmd_display}"
 
         logger.info("Approval callback: %s → %s (session %s), %d resolved",
                      action, choice, session_key[:40], count)
@@ -779,6 +781,11 @@ class MattermostApprovalAdapter(MattermostAdapter):
             logger.warning("Clarify choice callback: missing clarify_id")
             return {"ephemeral_text": "⚠️ Invalid clarify callback"}
 
+        # 从 send_clarify 缓存中取回原始问题与全部选项，用于保留历史
+        meta = getattr(self, "_clarify_posts", {}).get(clarify_id, {})
+        question = meta.get("question", "")
+        choices = meta.get("choices")
+
         resolved = resolve_gateway_clarify(clarify_id, choice_value)
         if not resolved:
             logger.warning(
@@ -792,8 +799,8 @@ class MattermostApprovalAdapter(MattermostAdapter):
             clarify_id, choice_value,
         )
 
-        # 更新原始卡片为确认状态
-        card = render_clarify_choice_confirmed_card(choice_value)
+        # 更新原始卡片为确认状态（保留原问题 + 全部选项 + 选择结果）
+        card = render_clarify_choice_confirmed_card(question, choices, choice_value)
         return {
             "update": {
                 "message": "",
@@ -817,6 +824,11 @@ class MattermostApprovalAdapter(MattermostAdapter):
             logger.warning("Clarify other callback: missing clarify_id")
             return {"ephemeral_text": "⚠️ Invalid clarify callback"}
 
+        # 从 send_clarify 缓存取回原问题与选项，保留历史
+        meta = getattr(self, "_clarify_posts", {}).get(clarify_id, {})
+        question = meta.get("question", "")
+        choices = meta.get("choices")
+
         ok = mark_awaiting_text(clarify_id)
         if not ok:
             logger.warning(
@@ -826,8 +838,8 @@ class MattermostApprovalAdapter(MattermostAdapter):
 
         logger.info("Clarify other callback: awaiting text clarify_id=%s", clarify_id)
 
-        # 更新原始卡片为「请输入」提示
-        card = render_clarify_other_prompt_card()
+        # 更新原始卡片为「请输入」提示（保留原问题 + 原选项）
+        card = render_clarify_other_prompt_card(question, choices)
         return {
             "update": {
                 "message": "",
@@ -1083,6 +1095,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                             "action": "approve_once",
                             "session_key": session_key,
                             "command": command,
+                            "reason": description,
                             "chat_id": chat_id,
                         },
                     },
@@ -1100,6 +1113,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                             "action": "approve_session",
                             "session_key": session_key,
                             "command": command,
+                            "reason": description,
                             "chat_id": chat_id,
                         },
                     },
@@ -1116,6 +1130,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
                             "action": "approve_always",
                             "session_key": session_key,
                             "command": command,
+                            "reason": description,
                             "chat_id": chat_id,
                         },
                     },
@@ -1130,6 +1145,8 @@ class MattermostApprovalAdapter(MattermostAdapter):
                     "context": {
                         "action": "deny",
                         "session_key": session_key,
+                        "command": command,
+                        "reason": description,
                         "chat_id": chat_id,
                     },
                 },
@@ -1835,10 +1852,15 @@ class MattermostApprovalAdapter(MattermostAdapter):
         post_id = await self._post_card_in_thread(chat_id, root_id, card)
 
         if post_id:
-            # 保存 post_id → clarify_id 映射，供回调时更新卡片
+            # 保存 clarify 元信息（post_id + 问题 + 选项），
+            # 供回调时渲染「保留原问题/选项」的确认卡片。
             if not hasattr(self, "_clarify_posts"):
-                self._clarify_posts: Dict[str, str] = {}
-            self._clarify_posts[clarify_id] = post_id
+                self._clarify_posts: Dict[str, Dict[str, Any]] = {}
+            self._clarify_posts[clarify_id] = {
+                "post_id": post_id,
+                "question": question,
+                "choices": list(choices) if choices else None,
+            }
 
             logger.info(
                 "Mattermost: send_clarify — question=%r clarify_id=%s post_id=%s",

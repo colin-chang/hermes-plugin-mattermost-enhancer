@@ -336,11 +336,28 @@ def render_clarify_card(
     }
 
 
-def render_clarify_choice_confirmed_card(choice: str) -> Dict[str, Any]:
-    """Clarify 选项被选择后的确认卡片。"""
+def render_clarify_choice_confirmed_card(
+    question: str,
+    choices: Optional[List[str]],
+    choice: str,
+) -> Dict[str, Any]:
+    """Clarify 选项被选择后的确认卡片 — 保留原问题与全部选项。
+
+    Mattermost 的 update 响应是「替换式」的，默认会把原始问题与选项按钮
+    一起顶掉，回看历史只剩「已选择 XX」。这里把问题、全部选项（用 ✅ 标记
+    被选项）与最终选择结果一起重新渲染，保证历史可回溯。
+    """
+    lines: List[str] = []
+    if choices:
+        for ch in choices:
+            marker = "✅" if ch == choice else "▫️"
+            lines.append(f"{marker} {ch}")
+    else:
+        # 边缘回退：选项缓存丢失时，至少保留一行结果
+        lines.append(f"✅ **已选择: {choice}**")
     attachment = _make_attachment(
-        pretext="",
-        text=f"✅ 已选择: **{choice}**",
+        pretext=f"❓ {question}" if question else "",
+        text="\n".join(lines),
         actions=[],
         color="#4CAF50",
     )
@@ -349,11 +366,22 @@ def render_clarify_choice_confirmed_card(choice: str) -> Dict[str, Any]:
     }
 
 
-def render_clarify_other_prompt_card() -> Dict[str, Any]:
-    """Clarify「其他」按钮被点击后的提示卡片。"""
+def render_clarify_other_prompt_card(
+    question: str,
+    choices: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Clarify「其他」按钮被点击后的提示卡片 — 保留原问题。
+
+    保留原问题（pretext），提示用户自由输入。若原本有选项，一并列出供回顾。
+    """
+    lines: List[str] = ["📝 请在下方输入你的回答："]
+    if choices:
+        lines.insert(0, "（原选项供参考——你选择了「其他」自由输入）")
+        for ch in choices:
+            lines.append(f"▫️ {ch}")
     attachment = _make_attachment(
-        pretext="",
-        text="📝 请在下方输入你的回答：",
+        pretext=f"❓ {question}" if question else "",
+        text="\n".join(lines),
         actions=[],
         color="#FF9800",
     )
