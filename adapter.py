@@ -119,6 +119,11 @@ class MattermostApprovalAdapter(MattermostAdapter):
         self._callback_thread = None
         # gateway 主事件循环引用（由 _start_callback_server 填充，followup 使用）
         self._gateway_main_loop = None
+        # 入站消息 sender 追踪：用于 DM 审批精确定位发起者。
+        # key = channel_id 或 (channel_id, thread_id)，value = 最近发言的 user_id。
+        # 修复多用户频道下审批误发给管理员（members 反查只能取第一个非 bot 成员）。
+        self._last_sender_by_channel: Dict[str, str] = {}
+        self._last_sender_by_thread: Dict[Tuple[str, str], str] = {}
 
     # ══════════════════════════════════════════════════════════════════════
     # 公共辅助方法
@@ -166,6 +171,10 @@ class MattermostApprovalAdapter(MattermostAdapter):
 
         替代 patch 8：当 run.py 未传 user_id 时，通过 channel members API
         反查 DM channel 中的对方用户 ID。额外一次 GET 请求，仅在审批触发时调用。
+
+        注意：多用户频道（public/group）下 members 列表有多个非 bot 成员，
+        取「第一个」不可靠（通常是管理员）。senders 追踪命中时应优先用
+        `_resolve_approval_requester`，本方法仅作最后兜底。
         """
         try:
             data = await self._api_get(f"channels/{channel_id}/members")
@@ -180,6 +189,44 @@ class MattermostApprovalAdapter(MattermostAdapter):
                 channel_id, exc_info=True,
             )
         return None
+
+    def build_source(self, *args, **kwargs):
+        """覆写基类 build_source — 记录入站消息 sender，供 DM 审批定位发起者。
+
+        审批请求由 gateway 在消息处理过程中同步触发，此时该消息的 sender
+        就是真正发起人。多用户频道下 members 反查无法区分发起者，这里在
+        每条入站消息落地 source 前记录发送者，send_exec_approval 据此精确定位。
+        """
+        try:
+            chat_id = kwargs.get("chat_id")
+            user_id = kwargs.get("user_id")
+            thread_id = kwargs.get("thread_id")
+            if chat_id and user_id:
+                self._last_sender_by_channel[str(chat_id)] = str(user_id)
+                if thread_id:
+                    self._last_sender_by_thread[(str(chat_id), str(thread_id))] = str(user_id)
+        except Exception:
+            logger.debug(
+                "Mattermost: build_source sender tracking failed",
+                exc_info=True,
+            )
+        return super().build_source(*args, **kwargs)
+
+    def _resolve_approval_requester(
+        self, chat_id: str, metadata: Optional[Dict[str, Any]]
+    ) -> Optional[str]:
+        """从入站 sender 追踪中定位审批发起者。
+
+        优先级：thread 精确匹配 → channel 最近发言 → None（由调用方兜底）。
+        修复多用户频道下 members 反查误取第一个非 bot 成员（通常是管理员）。
+        """
+        cid = str(chat_id)
+        thread_id = (metadata or {}).get("thread_id")
+        if thread_id:
+            uid = self._last_sender_by_thread.get((cid, str(thread_id)))
+            if uid:
+                return uid
+        return self._last_sender_by_channel.get(cid)
 
     # ══════════════════════════════════════════════════════════════════════
     # 回调服务器（多路由）— 独立线程 + 独立事件循环
@@ -1057,7 +1104,13 @@ class MattermostApprovalAdapter(MattermostAdapter):
         if smart_denied:
             description += "（Owner override，仅本次生效）"
         if not user_id:
-            # 替代 patch 8：从 chat_id 反查 DM channel members 推导 user_id
+            # 精准定位发起者：先用 build_source 记录的最近发言信息。
+            # 多用户频道（public/group）下 members 反查会误发管理员，
+            # 只有追踪未命中时才回退到旧逻辑。
+            user_id = self._resolve_approval_requester(chat_id, metadata)
+        if not user_id:
+            # 兜底：反查 DM channel members（仅 DM 场景可靠；追踪命中的正常
+            # 路径不会走到这里）。
             user_id = await self._get_user_id_from_channel(chat_id)
         if not user_id:
             return SendResult(
