@@ -1,5 +1,5 @@
 name: mattermost-enhancer
-version: 2026.9.7
+version: 2026.9.16
 description: "Hermes Mattermost 增强插件 — DM 审批 / 模型切换 / 会话重置 / Clarify 交互卡片 / Typing Thread 路由 / WebSocket 心跳 15s / Channel→Thread 模型继承。覆盖内置 MattermostAdapter。"
 author: Colin Chang
 license: MIT
