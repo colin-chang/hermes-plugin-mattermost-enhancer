@@ -514,7 +514,15 @@ class MattermostApprovalAdapter(MattermostAdapter):
                     channel_id, user_id, root_id, params.get("text", ""), command,
                 )
             )
-            return {}
+            # Mattermost does not record the typed slash command. Reply in-channel
+            # immediately so the user sees that the asynchronous work was accepted.
+            return {
+                "response_type": "in_channel",
+                "text": (
+                    f"🗜️ `/{command}` 已接收，正在压缩当前对话上下文…\n"
+                    "完成后会在这里显示结果。"
+                ),
+            }
 
         return {"response_type": "ephemeral", "text": f"Unknown command: /{command}"}
 

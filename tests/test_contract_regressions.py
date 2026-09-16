@@ -91,7 +91,7 @@ def test_mattermost_compress_commands_delegate_to_the_canonical_gateway_handler(
         node.value for node in ast.walk(route)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     }
-    assert {"compress", "compact"} <= route_values
+    assert {"compress", "compact", "in_channel"} <= route_values
 
     handler = _method(adapter, "_handle_compress_command")
     handler_source = ast.unparse(handler)
