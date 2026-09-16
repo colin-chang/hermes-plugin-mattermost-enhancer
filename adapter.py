@@ -318,14 +318,38 @@ class MattermostApprovalAdapter(MattermostAdapter):
 
         async def _handler(reader: _asyncio.StreamReader, writer: _asyncio.StreamWriter):
             try:
-                request_data = await _asyncio.wait_for(reader.read(65536), timeout=10.0)
-                if not request_data:
+                # TCP has no message boundary: a single read may contain only part of a
+                # Mattermost callback body. Read headers first, then the exact Content-Length
+                # payload so cards do not intermittently fail as "Invalid JSON" under CI or load.
+                header_bytes = await _asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10.0)
+                if len(header_bytes) > 65536:
+                    writer.write(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n")
+                    await writer.drain()
                     writer.close()
                     return
-
-                request_text = request_data.decode("utf-8", errors="replace")
-                headers, _, body = request_text.partition("\r\n\r\n")
-                request_line = headers.split("\r\n")[0]
+                headers = header_bytes[:-4].decode("utf-8", errors="replace")
+                content_length = 0
+                for line in headers.split("\r\n")[1:]:
+                    name, separator, value = line.partition(":")
+                    if separator and name.lower() == "content-length":
+                        try:
+                            content_length = int(value.strip())
+                        except ValueError:
+                            content_length = -1
+                        break
+                if content_length < 0 or content_length > 65536:
+                    writer.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                    await writer.drain()
+                    writer.close()
+                    return
+                body = (
+                    (await _asyncio.wait_for(reader.readexactly(content_length), timeout=10.0)).decode(
+                        "utf-8", errors="replace"
+                    )
+                    if content_length
+                    else ""
+                )
+                request_line = headers.split("\r\n", 1)[0]
                 parts = request_line.split(" ", 2)
                 if len(parts) < 2:
                     writer.close()
