@@ -387,8 +387,8 @@ async def main():
     with urllib.request.urlopen(req, timeout=15) as resp:
         compact_body = json.loads(resp.read())
         compact_elapsed = time.monotonic() - t0
-    check("HTTP 200 + in-channel ack", compact_body.get("response_type") == "in_channel", f"got: {compact_body}")
-    check("ack 明示执行中", "正在压缩" in compact_body.get("text", ""), f"got: {compact_body}")
+    check("HTTP 200 + ephemeral transport ack", compact_body.get("response_type") == "ephemeral", f"got: {compact_body}")
+    check("ack 明示启动压缩", "正在启动压缩" in compact_body.get("text", ""), f"got: {compact_body}")
     check("响应 < 500ms", compact_elapsed < 0.5, f"took {compact_elapsed*1000:.0f}ms")
     check("compact followup 已派发", len(dispatched) == 4)
     compact_followup = dispatched[-1]

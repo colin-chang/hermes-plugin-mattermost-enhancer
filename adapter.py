@@ -514,14 +514,13 @@ class MattermostApprovalAdapter(MattermostAdapter):
                     channel_id, user_id, root_id, params.get("text", ""), command,
                 )
             )
-            # Mattermost does not record the typed slash command. Reply in-channel
-            # immediately so the user sees that the asynchronous work was accepted.
+            # Mattermost does not record the typed slash command. An in_channel slash
+            # response is authored as the invoking user and is fed back to the Gateway as
+            # a fresh inbound turn. Use an ephemeral transport acknowledgement here; the
+            # followup posts the durable in-thread acknowledgement as the bot instead.
             return {
-                "response_type": "in_channel",
-                "text": (
-                    f"🗜️ `/{command}` 已接收，正在压缩当前对话上下文…\n"
-                    "完成后会在这里显示结果。"
-                ),
+                "response_type": "ephemeral",
+                "text": f"🗜️ `/{command}` 已接收，正在启动压缩…",
             }
 
         return {"response_type": "ephemeral", "text": f"Unknown command: /{command}"}
@@ -651,6 +650,30 @@ class MattermostApprovalAdapter(MattermostAdapter):
         compression implementation's lock, transcript, profile, session-rotation, and
         Codex app-server semantics. ``/compact`` deliberately normalizes to ``/compress``.
         """
+        acknowledgement_post_id = None
+        acknowledgement = (
+            f"🗜️ `/{invoked_as}` 已接收，正在压缩当前对话上下文…\n"
+            "完成后会在这里更新结果。"
+        )
+        try:
+            acknowledgement_result = await self.send(
+                channel_id,
+                acknowledgement,
+                metadata={"thread_id": root_id} if root_id else None,
+            )
+            if acknowledgement_result.success:
+                acknowledgement_post_id = acknowledgement_result.message_id
+            else:
+                logger.warning(
+                    "Mattermost /%s acknowledgement post failed: channel=%s root_id=%s",
+                    invoked_as, channel_id[:8], root_id or "(channel-level)",
+                )
+        except Exception:
+            logger.exception(
+                "Mattermost /%s acknowledgement delivery failed: channel=%s root_id=%s",
+                invoked_as, channel_id[:8], root_id or "(channel-level)",
+            )
+
         try:
             from gateway.config import Platform
             from gateway.platforms.event import MessageEvent
@@ -691,10 +714,30 @@ class MattermostApprovalAdapter(MattermostAdapter):
             result = "❌ 压缩失败：Hermes Gateway 暂时无法处理此会话，请稍后重试。"
 
         if result:
+            final_text = f"🗜️ `/{invoked_as}` 处理结果\n\n{result}"
+            if acknowledgement_post_id:
+                try:
+                    updated = await self.edit_message(
+                        chat_id=channel_id,
+                        message_id=acknowledgement_post_id,
+                        content=final_text,
+                        finalize=True,
+                    )
+                    if updated.success:
+                        return
+                    logger.warning(
+                        "Mattermost /%s acknowledgement update failed: post=%s",
+                        invoked_as, acknowledgement_post_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Mattermost /%s acknowledgement update errored: post=%s",
+                        invoked_as, acknowledgement_post_id,
+                    )
             try:
                 await self.send(
                     channel_id,
-                    str(result),
+                    final_text,
                     metadata={"thread_id": root_id} if root_id else None,
                 )
             except Exception:

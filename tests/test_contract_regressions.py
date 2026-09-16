@@ -91,7 +91,8 @@ def test_mattermost_compress_commands_delegate_to_the_canonical_gateway_handler(
         node.value for node in ast.walk(route)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     }
-    assert {"compress", "compact", "in_channel"} <= route_values
+    assert {"compress", "compact", "ephemeral"} <= route_values
+    assert "in_channel" not in route_values
 
     handler = _method(adapter, "_handle_compress_command")
     handler_source = ast.unparse(handler)
@@ -101,4 +102,6 @@ def test_mattermost_compress_commands_delegate_to_the_canonical_gateway_handler(
     }
     assert "/compress " in handler_values
     assert "_handle_compress_command(event)" in handler_source
+    assert "await self.send(channel_id, acknowledgement" in handler_source
+    assert "await self.edit_message(chat_id=channel_id" in handler_source
     assert "metadata={'thread_id': root_id}" in handler_source
