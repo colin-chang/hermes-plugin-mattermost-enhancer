@@ -1,7 +1,17 @@
-# Bytecode
+# Local secrets and environments
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# Python caches and test artifacts
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+.coverage
+htmlcov/
 
 # IDE
 .idea/

@@ -276,9 +276,10 @@ MATTERMOST_CALLBACK_URL=http://host.docker.internal:18065/mattermost/callback
 # 💻 本地部署（Mattermost 和 Hermes 在同一台机器、不用 Docker）：
 #    可以不填，插件会自动用 http://127.0.0.1:18065/mattermost/callback
 
-# ═══ 可选 ═══
-# HMAC 签名验证（增强安全，不填则跳过验证）
-# MATTERMOST_CALLBACK_SECRET=你的密钥
+# ═══ 强烈建议配置 ═══
+# HMAC 签名验证：当回调端口可被 Docker 网络或其他设备访问时必须配置。
+# 生成示例：openssl rand -hex 32
+MATTERMOST_CALLBACK_SECRET=replace-with-a-long-random-secret
 ```
 
 > ⚠️ 如果你像大多数自部署用户一样，Mattermost 跑在 Docker 容器里，**`MATTERMOST_CALLBACK_URL` 必须填**，否则容器里的 Mattermost 无法回调到宿主机的 Hermes。
@@ -301,8 +302,12 @@ cd ~/.hermes/plugins/mattermost-enhancer
 如果 `check` 显示未应用，执行补丁：
 
 ```bash
-# 应用补丁（完成后会自动询问你是否立即重启）
+# 应用补丁
 ./scripts/hermes-mattermost-enhancer.sh apply
+
+# 必须在外部 Terminal / Ghostty 重启 Gateway，才能加载新的 Gateway 补丁
+# 不要在 Hermes 的 Mattermost 对话中执行这条命令。
+hermes gateway restart
 ```
 
 > 💡 别忘了主脚本：`~/.hermes/scripts/hermes-patches.sh apply` 修复平台无关的 Bug。
@@ -381,6 +386,8 @@ A: Hermes 大版本升级后，源码可能被覆盖。建议两个脚本都跑�
 ./scripts/hermes-mattermost-enhancer.sh check
 ```
 
+如果升级后审批退化成普通 `/approve` 文字、没有 DM 卡片，检查 Enhancer 是否已加载，并确认 `MattermostApprovalAdapter.supports_exec_approval_buttons()` 仍返回 `True`。Hermes v0.21.3 起会先用这个能力声明决定是否调用卡片发送逻辑。
+
 **Q: 脚本会不会搞坏我的 Hermes？**
 
 A: 不会。它只做了最小改动，你可以用 `check` 随时查看状态。如果想还原，重新安装 Hermes 即可。
@@ -407,8 +414,9 @@ mattermost-enhancer/
 ├── __init__.py              # 插件入口
 ├── adapter.py               # 核心逻辑（50+ 个方法）
 ├── cards.py                 # 交互卡片模板
-├── models.py                # 模型列表
-├── callback_server.py       # 回调服务器
+├── models.py                # 模型列表与 provider 解析
+├── session_actions.py       # 模型切换 / 会话重置（可独立测试）
+├── callback_server.py       # 回调服务器环境检查
 ├── scripts/
 │   └── hermes-mattermost-enhancer.sh   # 配套 Shell 脚本（Mattermost Gateway 补丁）
 ├── references/

@@ -275,9 +275,11 @@ MATTERMOST_CALLBACK_URL=http://host.docker.internal:18065/mattermost/callback
 # 💻 Local deployment (Mattermost + Hermes on same machine, no Docker):
 #    Can leave blank — plugin auto-falls-back to http://127.0.0.1:18065/mattermost/callback
 
-# ═══ Optional ═══
-# HMAC signature verification (skips verification if left empty)
-# MATTERMOST_CALLBACK_SECRET=your-secret
+# ═══ Strongly recommended ═══
+# HMAC signature verification. Configure this whenever the callback endpoint is
+# reachable from a Docker network or another device.
+# Generate one with: openssl rand -hex 32
+MATTERMOST_CALLBACK_SECRET=replace-with-a-long-random-secret
 ```
 
 > ⚠️ If you're like most self-hosting users with Mattermost running in Docker, **`MATTERMOST_CALLBACK_URL` must be set**. Without it, the Docker container can't reach Hermes on the host machine.
@@ -300,8 +302,12 @@ cd ~/.hermes/plugins/mattermost-enhancer
 If `check` shows patches not applied, run:
 
 ```bash
-# Apply patches (will automatically ask if you want to restart immediately after)
+# Apply patches
 ./scripts/hermes-mattermost-enhancer.sh apply
+
+# You MUST restart the Gateway from an external Terminal / Ghostty window to
+# load the Gateway patches. Do not run this inside a Hermes Mattermost chat.
+hermes gateway restart
 ```
 
 > 💡 Don't forget the main script too: `~/.hermes/scripts/hermes-patches.sh apply` for the platform-agnostic fixes.
@@ -380,6 +386,8 @@ A: Major Hermes upgrades may overwrite the source fixes. It's recommended to run
 ./scripts/hermes-mattermost-enhancer.sh check
 ```
 
+If approval falls back to plain `/approve` text after an upgrade and no DM card appears, verify that the Enhancer loaded and that `MattermostApprovalAdapter.supports_exec_approval_buttons()` still returns `True`. Hermes v0.21.3+ uses this capability declaration before it calls the card-sending path.
+
 **Q: Will the scripts mess up my Hermes?**
 
 A: No. They make minimal changes. You can check status anytime with `check`. To revert, simply reinstall Hermes.
@@ -406,8 +414,9 @@ mattermost-enhancer/
 ├── __init__.py              # Plugin entry point
 ├── adapter.py               # Core logic (50+ methods)
 ├── cards.py                 # Interactive card templates
-├── models.py                # Model list resolver
-├── callback_server.py       # Callback server
+├── models.py                # Model list and provider resolution
+├── session_actions.py       # Model switching / session reset (independently testable)
+├── callback_server.py       # Callback server environment check
 ├── scripts/
 │   └── hermes-mattermost-enhancer.sh   # Companion shell script (Mattermost Gateway patches)
 ├── references/

@@ -1,7 +1,7 @@
 # Mattermost Interactive Message & Slash Command API 契约
 
 > 关联：Hermes Platform Plugin `mattermost-enhancer`
-> 版本：1.0.0 | 最后更新：2026-05-22
+> 版本：v0.21.3 对齐 | 最后更新：2026-09-16
 
 ## 1. Slash Command POST（`/model` / `/new`）
 
@@ -13,7 +13,7 @@ Mattermost System Console 配置的自定义 Slash 指令 → 插件 callback se
 POST /mm-command
 Content-Type: application/x-www-form-urlencoded
 
-token=<system_concole_token>
+token=<slash_command_token>
 team_id=<team_id>
 team_domain=<team_domain>
 channel_id=<channel_id>
@@ -28,10 +28,12 @@ root_id=<root_post_id>       # ← 关键字段！Thread 中 = root post ID，Ch
 
 **root_id 字段说明（MM 原生支持）：**
 
-| 发送位置 | root_id 值 | session_key 格式 |
-|---------|-----------|-----------------|
-| Channel 顶层 | `""`（空字符串） | `agent:main:mattermost:group:<channel_id>` |
-| Thread 内 | `"twcryzndejf15px8cuhy43sx4a"` | `agent:main:mattermost:group:<channel_id>:<root_id>` |
+| 发送位置 | root_id 值 |
+|---------|-----------|
+| Channel 顶层 | `""`（空字符串） |
+| Thread 内 | 当前 Thread 的 root post ID |
+
+> 插件不得手拼 session key。Hermes 的 `build_session_key()` / Gateway `_session_key_for_source()` 会根据当前会话策略决定 `channel`、`group`、Thread 与 per-user 后缀；`/model` 和模型继承一律通过这些 helper 获取同一真源。
 
 ### 1.2 响应格式
 
@@ -117,6 +119,12 @@ X-Mattermost-Signature: <hmac_sha256_hex>   # 如果配置了 MATTERMOST_CALLBAC
 | `cmd_new_cancel` | `cmdnewcancel` | 取消创建新会话 | - |
 
 **约束：** action_id 必须**纯字母**，连字符/下划线会被 Mattermost 拒绝。
+
+### 2.4 Hermes Adapter Capability & Persistence Contract
+
+- `MattermostApprovalAdapter.supports_exec_approval_buttons()` 必须返回 `True`。Hermes v0.21.3 起，Gateway 先检查这一能力声明，只有通过后才调用 `send_exec_approval()` 投递 DM 卡片。
+- 模型切换必须通过 `async_session_store.set_model_override()` 持久化非敏感字段（`model`、`provider`、`base_url`）。API key 与 API mode 不得进入持久化 session routing 数据；Gateway 重启时会重新解析凭据。
+- 适配器注册时必须继续传递 bundled Mattermost adapter 的 `apply_yaml_config_fn`、`standalone_sender_fn`、`validate_config`、`is_connected` 与消息长度设置。`register_platform()` 是 last-writer-wins，遗漏任何字段都会静默丢功能。
 
 ---
 

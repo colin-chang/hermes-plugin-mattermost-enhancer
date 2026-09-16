@@ -1279,171 +1279,24 @@ class MattermostApprovalAdapter(MattermostAdapter):
     # ══════════════════════════════════════════════════════════════════════
 
     def _get_current_model_from_key(self, session_key: str) -> str:
-        """从 session override 或 config 获取当前模型名。"""
-        try:
-            from gateway.run import _gateway_runner_ref
-            runner = _gateway_runner_ref()
-            if runner:
-                override = runner._session_model_overrides.get(session_key, {})
-                if override:
-                    return override.get("model", "")
-        except Exception:
-            pass
+        """Compatibility wrapper for session_actions.current_model()."""
+        from .session_actions import current_model
 
-        try:
-            from hermes_cli.config import load_config
-            cfg = load_config()
-            return cfg.get("model", {}).get("default", "")
-        except Exception:
-            return ""
+        return current_model(self, session_key)
 
     async def _switch_session_model(
         self, session_key: str, model_id: str, provider_name: str,
     ) -> Tuple[bool, str]:
-        """执行模型切换 — 直接从 custom_providers 配置构建 session override。
+        """Compatibility wrapper for session_actions.switch_session_model()."""
+        from .session_actions import switch_session_model
 
-        绕过 switch_model() 的复杂路由逻辑，直接读取 provider 配置。
-        这确保 api_key 正确解析、响应速度快、provider 正确匹配。
-        """
-        try:
-            from gateway.run import _gateway_runner_ref
-            runner = _gateway_runner_ref()
-            if not runner:
-                return False, "GatewayRunner not available"
-
-            # 从 custom_providers 配置直接解析 provider 连接信息
-            from .models import resolve_provider_config
-            prov_cfg = resolve_provider_config(provider_name)
-
-            # 先记录旧模型（必须在写入 override 之前）
-            old_model = self._get_current_model_from_key(session_key) or "(default)"
-
-            if prov_cfg:
-                # 直接构建 override — 无需调用 switch_model
-                runner._session_model_overrides[session_key] = {
-                    "model": model_id,
-                    "provider": prov_cfg["provider"],
-                    "base_url": prov_cfg["base_url"],
-                    "api_key": prov_cfg["api_key"],
-                    "api_mode": prov_cfg["api_mode"],
-                }
-            else:
-                # provider 不在 custom_providers 中 — 回退到 switch_model
-                logger.warning(
-                    "Provider '%s' not in custom_providers, falling back to switch_model for %s",
-                    provider_name, model_id,
-                )
-                from hermes_cli.config import load_config
-                cfg = load_config()
-                model_cfg = cfg.get("model", {})
-                user_provs = cfg.get("providers")
-                try:
-                    from hermes_cli.config import get_compatible_custom_providers
-                    custom_provs = get_compatible_custom_providers(cfg)
-                except Exception:
-                    custom_provs = cfg.get("custom_providers")
-
-                override = runner._session_model_overrides.get(session_key, {})
-                current_provider = override.get("provider", model_cfg.get("provider", "openrouter"))
-                current_model = override.get("model", model_cfg.get("default", ""))
-                current_base_url = override.get("base_url", model_cfg.get("base_url", ""))
-                current_api_key = override.get("api_key", "")
-
-                from hermes_cli.model_switch import switch_model
-                result = switch_model(
-                    raw_input=model_id,
-                    current_provider=current_provider,
-                    current_model=current_model,
-                    current_base_url=current_base_url,
-                    current_api_key=current_api_key,
-                    user_providers=user_provs,
-                    custom_providers=custom_provs,
-                    explicit_provider=provider_name or None,
-                )
-
-                if not result.success:
-                    return False, result.error_message or "switch_model failed"
-
-                runner._session_model_overrides[session_key] = {
-                    "model": result.new_model,
-                    "provider": result.target_provider,
-                    "base_url": result.base_url,
-                    "api_key": result.api_key,
-                    "api_mode": result.api_mode,
-                }
-
-            # 清除缓存的 agent
-            runner._evict_cached_agent(session_key)
-
-            # 注入 model note — 让 LLM 知道自己被切换了
-            # 这样 LLM 回答"当前模型"时会正确报告新模型
-            if not hasattr(runner, "_pending_model_notes"):
-                runner._pending_model_notes = {}
-            _verify = runner._session_model_overrides.get(session_key, {})
-            _new_provider = _verify.get("provider", provider_name)
-            runner._pending_model_notes[session_key] = (
-                f"[Note: model was just switched from {old_model} to {model_id} "
-                f"via {_new_provider}. "
-                f"Adjust your self-identification accordingly.]"
-            )
-
-            # 验证 override 是否真的写入了
-            verify = runner._session_model_overrides.get(session_key)
-            if verify:
-                logger.info(
-                    "Model switched: session=%s → %s provider=%s api_key_len=%d override_verified=YES",
-                    session_key, model_id,
-                    verify.get("provider", "?"),
-                    len(verify.get("api_key", "")),
-                )
-            else:
-                logger.error(
-                    "Model switch FAILED to persist: session=%s model=%s override_keys=%s",
-                    session_key, model_id,
-                    list(runner._session_model_overrides.keys())[:5],
-                )
-            return True, model_id
-
-        except Exception as e:
-            logger.error("Model switch failed: %s", e, exc_info=True)
-            return False, str(e)
+        return await switch_session_model(self, session_key, model_id, provider_name)
 
     async def _reset_session(self, session_key: str) -> Tuple[bool, str]:
-        """执行会话重置，通过 GatewayRunner。"""
-        try:
-            from gateway.run import _gateway_runner_ref
-            runner = _gateway_runner_ref()
-            if not runner:
-                return False, "GatewayRunner not available"
+        """Compatibility wrapper for session_actions.reset_session()."""
+        from .session_actions import reset_session
 
-            # 清除 session override
-            runner._session_model_overrides.pop(session_key, None)
-
-            # 清除缓存 agent
-            runner._evict_cached_agent(session_key)
-
-            # 重置 session store
-            if hasattr(runner, "session_store"):
-                runner.session_store.reset_session(session_key)
-
-            # 清除 reasoning override
-            if hasattr(runner, "_set_session_reasoning_override"):
-                runner._set_session_reasoning_override(session_key, None)
-
-            # 清除 pending model notes
-            if hasattr(runner, "_pending_model_notes"):
-                runner._pending_model_notes.pop(session_key, None)
-
-            # 清除 session boundary security state
-            if hasattr(runner, "_clear_session_boundary_security_state"):
-                runner._clear_session_boundary_security_state(session_key)
-
-            logger.info("Session reset: session=%s", session_key)
-            return True, "Session reset"
-
-        except Exception as e:
-            logger.error("Session reset failed: %s", e, exc_info=True)
-            return False, str(e)
+        return await reset_session(self, session_key)
 
     # ══════════════════════════════════════════════════════════════════════
     # （send_model_picker 已移除 — v2026.9.7 对齐）
