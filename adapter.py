@@ -9,9 +9,10 @@ MattermostApprovalAdapter — 继承内置 MattermostAdapter，扩展 DM 审批 
   1. DM 审批卡片 → 多用户频道按消息真实发送者精确定位发起者
   2. /model 模型切换卡片 → session_key 与 Gateway build_session_key 对齐
   3. /new 会话重置确认卡片
-  4. Clarify 交互卡片（按钮选择 + 「其他」文本输入）
-  5. 独立线程回调服务器 → HTTP 响应与 gateway 主 loop 负载解耦
-  6. Typing 指示器进 Thread、WebSocket 心跳 15s、footer 编辑合并
+  4. /compress 与 /compact → 调用 Hermes 原生上下文压缩
+  5. Clarify 交互卡片（按钮选择 + 「其他」文本输入）
+  6. 独立线程回调服务器 → HTTP 响应与 gateway 主 loop 负载解耦
+  7. Typing 指示器进 Thread、WebSocket 心跳 15s、footer 编辑合并
 
 上游对齐（v2026.9.7）：
   上游 bundled adapter 已原生实现 thread 路由（_post_message → root_id 解析 +
@@ -459,7 +460,7 @@ class MattermostApprovalAdapter(MattermostAdapter):
     # ══════════════════════════════════════════════════════════════════════
 
     async def _route_slash_command(self, body: str) -> Dict[str, Any]:
-        """处理 POST /mm-command（/model + /new）。
+        """处理 POST /mm-command（/model、/new、/compress、/compact）。
 
         关键设计：
           Slash Command 的 HTTP response 以用户身份显示 ephemeral（MM 设计限制）。
@@ -502,6 +503,16 @@ class MattermostApprovalAdapter(MattermostAdapter):
         elif command == "new":
             self._schedule_followup(
                 self._handle_new_command(channel_id, user_id, root_id)
+            )
+            return {}
+        elif command in {"compress", "compact"}:
+            # /compact is a compatibility alias. Always invoke Hermes' canonical
+            # /compress handler so parsing, locks, session rotation, and Codex
+            # app-server compaction remain owned by the upstream implementation.
+            self._schedule_followup(
+                self._handle_compress_command(
+                    channel_id, user_id, root_id, params.get("text", ""), command,
+                )
             )
             return {}
 
@@ -616,6 +627,73 @@ class MattermostApprovalAdapter(MattermostAdapter):
             return {}
 
         return {"response_type": "ephemeral", "text": "❌ 发送确认卡片失败，请稍后重试"}
+
+    async def _handle_compress_command(
+        self,
+        channel_id: str,
+        user_id: str,
+        root_id: Optional[str],
+        args: str,
+        invoked_as: str,
+    ) -> None:
+        """Invoke Hermes' canonical manual compression handler for a Mattermost session.
+
+        Mattermost intercepts slash commands before the gateway WebSocket sees them.
+        Reconstructing a native ``MessageEvent`` on the gateway loop retains the upstream
+        compression implementation's lock, transcript, profile, session-rotation, and
+        Codex app-server semantics. ``/compact`` deliberately normalizes to ``/compress``.
+        """
+        try:
+            from gateway.config import Platform
+            from gateway.platforms.event import MessageEvent
+            from gateway.run import _gateway_runner_ref
+            from gateway.session import SessionSource
+
+            runner = _gateway_runner_ref()
+            if runner is None:
+                raise RuntimeError("Gateway runner is unavailable")
+
+            chat_type = self._channel_type_cache.get(channel_id)
+            if chat_type is None:
+                try:
+                    info = await self.get_chat_info(channel_id)
+                    chat_type = info.get("type", "channel")
+                except Exception:
+                    chat_type = "channel"
+                self._channel_type_cache[channel_id] = chat_type
+
+            source = SessionSource(
+                platform=Platform.MATTERMOST,
+                chat_id=str(channel_id),
+                chat_type=chat_type,
+                user_id=user_id or None,
+                thread_id=root_id or None,
+            )
+            event = MessageEvent(
+                text=f"/compress {args}".strip(),
+                source=source,
+                message_id=root_id or None,
+            )
+            result = await runner._handle_compress_command(event)
+        except Exception:
+            logger.exception(
+                "Mattermost /%s failed: channel=%s root_id=%s",
+                invoked_as, channel_id[:8], root_id or "(channel-level)",
+            )
+            result = "❌ 压缩失败：Hermes Gateway 暂时无法处理此会话，请稍后重试。"
+
+        if result:
+            try:
+                await self.send(
+                    channel_id,
+                    str(result),
+                    metadata={"thread_id": root_id} if root_id else None,
+                )
+            except Exception:
+                logger.exception(
+                    "Mattermost /%s result delivery failed: channel=%s root_id=%s",
+                    invoked_as, channel_id[:8], root_id or "(channel-level)",
+                )
 
     # ══════════════════════════════════════════════════════════════════════
     # Session 上下文辅助

@@ -84,7 +84,30 @@ After confirming:
 
 ---
 
-### ⌨️ 4. Typing Indicator
+### 🗜️ 4. Compress Conversation Context (`/compress` / `/compact`)
+
+**Scenario:** A Thread has been active for a long time. Earlier discussion, tool results, and intermediate work accumulate, leaving less useful context room for the model and affecting speed, cost, and response consistency.
+
+**Before:** You had to open a new Thread or wait until context pressure became a problem 💀
+
+**Now:** Type `/compress` in the current Thread. Hermes condenses older discussion into a summary that preserves key decisions, then continues in the same session.
+
+```text
+/compress
+/compress Preserve the Mattermost plugin architecture, current decisions, and unfinished work
+/compress --preview
+/compress here 4
+```
+
+- `/compress --preview`: shows the compression plan without changing the conversation
+- `/compress here 4`: compresses older history while preserving the most recent four exchanges verbatim
+- `/compact`: a fully equivalent compatibility alias for `/compress`
+
+Hermes performs the compression through its internal session mechanism and posts the result back to the **same Thread**. If compression is already in progress or there is not enough history, Hermes reports that clearly without silently losing content.
+
+---
+
+### ⌨️ 5. Typing Indicator
 
 **Scenario:** You're waiting for Hermes to reply in a Thread and want to know it's thinking.
 
@@ -96,7 +119,7 @@ After confirming:
 
 ---
 
-### ❓ 5. AI Asks You Questions (Interactive Cards)
+### ❓ 6. AI Asks You Questions (Interactive Cards)
 
 **Scenario:** Hermes hits a decision point during a complex task — "This file has two processing approaches: A is fast but rough, B is slow but precise. Which one?" Or an open-ended question like "What approach would you prefer?"
 
@@ -114,7 +137,7 @@ Everything happens inside Mattermost — no window switching, no commands to mem
 
 ---
 
-### 🏷️ 6. Reply Footer (Model & Context)
+### 🏷️ 7. Reply Footer (Model & Context)
 
 **Scenario:** You have multiple Threads open, each potentially using a different AI model. Mid-conversation you think: "Wait, which model is this Thread using?"
 
@@ -250,12 +273,14 @@ hermes plugins install colin-chang/hermes-plugin-mattermost-enhancer --enable
 
 ### Step 2: Register Mattermost Slash Commands
 
-In **Mattermost System Console → Integrations → Slash Commands**, add two:
+In **Mattermost System Console → Integrations → Slash Commands**, add four:
 
 | Command | Request URL | Purpose |
 |---------|-------------|---------|
 | `/model` | `http://<your-hermes-host>:18065/mm-command` | Switch AI model |
 | `/new` | `http://<your-hermes-host>:18065/mm-command` | Reset session |
+| `/compress` | `http://<your-hermes-host>:18065/mm-command` | Compress current conversation context |
+| `/compact` | `http://<your-hermes-host>:18065/mm-command` | Compatibility alias for `/compress` |
 
 > 🔧 If Mattermost and Hermes are on the same machine (Docker deployment), use `http://host.docker.internal:18065/mm-command`
 

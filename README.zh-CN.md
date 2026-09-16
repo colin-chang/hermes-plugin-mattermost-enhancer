@@ -84,7 +84,30 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 ---
 
-### ⌨️ 4. 正在输入提示（Typing 指示器）
+### 🗜️ 4. 压缩对话上下文（`/compress` / `/compact`）
+
+**场景：** 一个 Thread 持续聊很久，早期讨论、工具结果和中间过程越积越多。模型能读取的上下文越来越紧张，速度、费用和回答稳定性都会受影响。
+
+**原来：** 只能另开 Thread，或者等到上下文接近上限才被动处理 💀
+
+**现在：** 在当前 Thread 输入 `/compress`，Hermes 会把较早的对话整理成保留关键决策的摘要，并保留当前会话继续工作。
+
+```text
+/compress
+/compress 保留 Mattermost 插件架构、当前决定和未完成任务
+/compress --preview
+/compress here 4
+```
+
+- `/compress --preview`：只显示压缩计划，不修改对话
+- `/compress here 4`：压缩更早历史，同时保留最近 4 轮原文
+- `/compact`：与 `/compress` 完全相同的兼容别名
+
+压缩由 Hermes 内部会话机制执行；完成后的结果会发回**同一个 Thread**。正在压缩或历史不足时，Hermes 会给出明确提示，不会静默丢失内容。
+
+---
+
+### ⌨️ 5. 正在输入提示（Typing 指示器）
 
 **场景：** 你在 Thread 里等 Hermes 回复，想知道它是不是在思考。
 
@@ -96,7 +119,7 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 ---
 
-### ❓ 5. AI 向你提问（交互式卡片）
+### ❓ 6. AI 向你提问（交互式卡片）
 
 **场景：** Hermes 在做复杂任务时，需要在几个方案里选一个继续。比如「这个文件有两种处理方式，A 快速但粗糙，B 慢但精细，你要哪个？」或者是开放式问题「你希望用哪种方案？」
 
@@ -114,7 +137,7 @@ Hermes 是一个 AI 助手，你可以在 Mattermost 里跟它对话，让它帮
 
 ---
 
-### 🏷️ 6. 显示当前模型（回复脚注）
+### 🏷️ 7. 显示当前模型（回复脚注）
 
 **场景：** 你同时开了好几个 Thread，每个 Thread 可能用不同的 AI 模型。聊着聊着就忘了「这个 Thread 用的是哪个模型？」
 
@@ -251,12 +274,14 @@ hermes plugins install colin-chang/hermes-plugin-mattermost-enhancer --enable
 
 ### 第 2 步：注册 Mattermost Slash 指令
 
-在 Mattermost **系统控制台 → 集成 → Slash 指令** 中添加两条：
+在 Mattermost **系统控制台 → 集成 → Slash 指令** 中添加四条：
 
 | 指令 | 请求 URL | 说明 |
 |------|---------|------|
 | `/model` | `http://<你的Hermes主机>:18065/mm-command` | 切换 AI 模型 |
 | `/new` | `http://<你的Hermes主机>:18065/mm-command` | 重置会话 |
+| `/compress` | `http://<你的Hermes主机>:18065/mm-command` | 压缩当前对话上下文 |
+| `/compact` | `http://<你的Hermes主机>:18065/mm-command` | `/compress` 的兼容别名 |
 
 > 🔧 如果 Mattermost 和 Hermes 在同一台机器上（Docker 部署），用 `http://host.docker.internal:18065/mm-command`
 

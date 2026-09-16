@@ -247,8 +247,12 @@ async def main():
     dispatched = []
 
     def fake_followup(coro):
-        # 同步记录派发的 followup 协程（不真正执行，避免触发真实 runner）
-        dispatched.append(coro)
+        # 同步记录派发的 followup 及其创建参数（不真正执行，避免触发真实 runner）。
+        frame = coro.cr_frame
+        dispatched.append({
+            "name": coro.cr_code.co_name,
+            "locals": dict(frame.f_locals) if frame else {},
+        })
         coro.close()
 
     ad._schedule_followup = fake_followup
@@ -374,7 +378,26 @@ async def main():
     await asyncio.sleep(0.2)
     check("model command followup 已派发", len(dispatched) == 3)
 
-    print("\n── 8. 主 loop 阻塞时回调仍即时（核心场景！）──")
+    print("\n── 8. /compact Slash Command — canonical /compress followup ──")
+    body = "command=/compact&text=keep+current+architecture&channel_id=chX&user_id=u1&root_id=threadX"
+    data = body.encode()
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    t0 = time.monotonic()
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        compact_body = json.loads(resp.read())
+        compact_elapsed = time.monotonic() - t0
+    check("HTTP 200 + 空 ephemeral", compact_body == {}, f"got: {compact_body}")
+    check("响应 < 500ms", compact_elapsed < 0.5, f"took {compact_elapsed*1000:.0f}ms")
+    check("compact followup 已派发", len(dispatched) == 4)
+    compact_followup = dispatched[-1]
+    compact_locals = compact_followup["locals"]
+    check("compact followup 类型正确", compact_followup["name"] == "_handle_compress_command")
+    check("compact 保留调用别名", compact_locals.get("invoked_as") == "compact")
+    check("focus 参数原样透传", compact_locals.get("args") == "keep current architecture")
+    check("Thread root_id 原样透传", compact_locals.get("root_id") == "threadX")
+
+    print("\n── 9. 主 loop 阻塞时回调仍即时（核心场景！）──")
     # 用真实同步阻塞占住主 loop 3 秒（模拟 agent 繁忙时同步操作霸占 loop）
     def _block_loop():
         time.sleep(3.0)

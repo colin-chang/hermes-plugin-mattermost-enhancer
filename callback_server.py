@@ -7,7 +7,7 @@ Mattermost 审批回调服务器 — HTTP 端点处理 Interactive Message 按�
 回调服务器由 adapter.py 的 _start_callback_server() 启动（原生 asyncio TCP），
 路由：
   POST /mattermost/callback  → Interactive Message 按钮回调（审批 + cmd_*）
-  POST /mm-command           → Slash 指令（/model + /new）
+  POST /mm-command           → Slash 指令（/model、/new、/compress、/compact）
 """
 from __future__ import annotations
 

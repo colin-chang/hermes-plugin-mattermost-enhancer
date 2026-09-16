@@ -81,3 +81,24 @@ def test_model_switch_writes_through_for_gateway_restart_rehydration():
         and node.func.attr == "set_model_override"
     ]
     assert calls, "session model selections must persist across Gateway restarts"
+
+
+def test_mattermost_compress_commands_delegate_to_the_canonical_gateway_handler():
+    tree = ast.parse((ROOT / "adapter.py").read_text(encoding="utf-8"))
+    adapter = _class(tree, "MattermostApprovalAdapter")
+    route = _method(adapter, "_route_slash_command")
+    route_values = {
+        node.value for node in ast.walk(route)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert {"compress", "compact"} <= route_values
+
+    handler = _method(adapter, "_handle_compress_command")
+    handler_source = ast.unparse(handler)
+    handler_values = {
+        node.value for node in ast.walk(handler)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert "/compress " in handler_values
+    assert "_handle_compress_command(event)" in handler_source
+    assert "metadata={'thread_id': root_id}" in handler_source
