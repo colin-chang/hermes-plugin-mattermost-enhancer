@@ -100,11 +100,46 @@ tools_pkg = types_mod.ModuleType("tools")
 tools_pkg.__path__ = []
 sys.modules["tools"] = tools_pkg
 
-clarify_src = Path(
-    "/Users/Colin/.hermes/hermes-agent/tools/clarify_gateway.py"
-)
-
 import importlib.util
+
+
+class _ClarifyEntry:
+    def __init__(self, clarify_id, _session_key, _question, _choices):
+        self.clarify_id = clarify_id
+        self.response = None
+        self.awaiting_text = False
+
+
+clarify_mod = types_mod.ModuleType("tools.clarify_gateway")
+clarify_mod._entries = {}
+
+
+def register_clarify(clarify_id, session_key, question, choices):
+    entry = _ClarifyEntry(clarify_id, session_key, question, choices)
+    clarify_mod._entries[clarify_id] = entry
+    return entry
+
+
+def resolve_gateway_clarify(clarify_id, response):
+    entry = clarify_mod._entries.get(clarify_id)
+    if entry is None or entry.response is not None:
+        return False
+    entry.response = response
+    return True
+
+
+def mark_awaiting_text(clarify_id):
+    entry = clarify_mod._entries.get(clarify_id)
+    if entry is None:
+        return False
+    entry.awaiting_text = True
+    return True
+
+
+clarify_mod.register = register_clarify
+clarify_mod.resolve_gateway_clarify = resolve_gateway_clarify
+clarify_mod.mark_awaiting_text = mark_awaiting_text
+sys.modules["tools.clarify_gateway"] = clarify_mod
 
 
 class _ApprovalEntry:
@@ -139,14 +174,6 @@ approval_wait_mod = types_mod.ModuleType("tools.approval_gateway_wait")
 approval_wait_mod._ApprovalEntry = _ApprovalEntry
 sys.modules["tools.approval_gateway_wait"] = approval_wait_mod
 
-def _load_real(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-clarify_mod = _load_real("tools.clarify_gateway", clarify_src)
 sys.modules["tools.environments"] = types_mod.ModuleType("tools.environments")
 sys.modules["tools.environments.base"] = types_mod.ModuleType("tools.environments.base")
 sys.modules["tools.clarify_tool"] = types_mod.ModuleType("tools.clarify_tool")
