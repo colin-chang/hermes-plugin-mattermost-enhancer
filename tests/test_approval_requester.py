@@ -151,6 +151,7 @@ async def main():
     cfg = MagicMock()
     cfg.extra = {}
     ad = MattermostApprovalAdapter(cfg)
+    check("DM approval card capability is advertised", ad.supports_exec_approval_buttons() is True)
     # 阻断真实网络：直接给 send( ) 打桩，避免审批后回执发消息
     ad.send = AsyncMock(return_value=SendResult(success=True, message_id="x"))
 

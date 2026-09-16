@@ -87,6 +87,20 @@ class MattermostApprovalAdapter(MattermostAdapter):
     # 插件历史上曾用 MAX_MESSAGE_LENGTH = MAX_POST_LENGTH 修正 4096 > 4000
     # 的截断差，现已由父类统一提供，不再重复定义。
 
+    @classmethod
+    def supports_exec_approval_buttons(cls) -> bool:
+        """Advertise the enhancer's DM approval cards to the v0.21.3 capability gate.
+
+        Hermes now asks ``BasePlatformAdapter`` subclasses this class-level
+        question before calling ``send_exec_approval``.  The base implementation
+        only recognises adapters overriding its newer private template hook;
+        this enhancer intentionally owns the public method because it must first
+        resolve the Mattermost requester and route the card to a DM.  Without
+        this explicit capability declaration the gateway silently chooses the
+        plain-text ``/approve`` fallback and no DM card is sent.
+        """
+        return True
+
     def __init__(self, config):
         super().__init__(config)
         self._model_picker_callbacks: Dict[str, Callable] = {}
