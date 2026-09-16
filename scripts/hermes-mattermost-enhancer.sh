@@ -40,27 +40,19 @@
 #     评论→正文合并 / 幽灵代码围栏 / stream fallback 丢失 reply_to
 #
 #   版本感知：
-#     最后验证: 2026-09-08（两轮：v2026.9.7-70 初验 + 当日 origin/main 复验）
-#     Hermes 版本: v2026.9.7-70-gee84ccd8bd（HEAD=ee84ccd8bd, origin=8aa219ef60）
-#     验证方式: 双重验证（check_pattern + old_string match）
-#     上游变更（v2026.8.27 → v2026.9.7）：
-#       gateway/run.py 从 19,700 行拆分为 run_turn/run_inbound/run_busy/
-#       run_startup/... mixin 模块 —— 两个 patch 的宿主全部迁移：
-#       E-P2 clarify 查找迁至 run_inbound.py _hm_clarify_reply（新统一入口
-#       _hm_pending_reply_intercepts 在 session 创建前执行，allow_gateway_control
-#       默认 True，MM 普通消息可进入）；E-P3 的原插入区消失，场景被新入口
-#       覆盖 → 移除；E-P4 auto-resume 枚举迁至 run_startup.py
-#       _resume_pending_candidates，SIGTERM 守卫抽为上游独立守卫模块。
-#       bundled mattermost adapter 本轮仅重构无行为变更；
-#       send_exec_approval 契约签名与插件覆写兼容
-#       （allow_permanent/allow_session/smart_denied 全部对齐）。
+#     最后验证: 2026-09-16
+#     Hermes 版本: v0.21.3（HEAD=origin/main=3c3ab69abb）
+#     验证方式: A+B+C 三重验证（上游等价实现 / 完整 old_string / 当前源码唯一匹配）
+#     E-P2 与 E-P4 均未被上游等价实现，两个完整 old_string 在最新版源码各唯一匹配一次；
+#     bundled Mattermost adapter 仅发生 YAML bridge、连接检测、standalone sender 与
+#     multi-image 返回值重构，插件覆写的继承与契约签名仍兼容。
 #
-#   已验证（v2026.9.7-70 / origin:main=ee84ccd8bd）：
-#     E-P2. run_inbound.py (Clarify Session)  — ❌ 未合入，新锚点 ✅ 唯一
-#     E-P3. run_inbound.py (Clarify 并发)     — ✅ 上游统一拦截架构覆盖，移除
-#     E-P4. run_startup.py (Session 串台去重) — ❌ 未合入，新锚点 ✅ 唯一
+#   已验证（v0.21.3 / origin:main=3c3ab69abb）：
+#     E-P2. run_inbound.py (Clarify Session)  — 未合入，old_string 唯一匹配
+#     E-P3. run_inbound.py (Clarify 并发)     — 上游统一拦截架构覆盖，维持移除
+#     E-P4. run_startup.py (Session 串台去重) — 未合入，old_string 唯一匹配
 #
-#   插件侧同步审计（adapter.py，v2026.9.7）：
+#   插件侧同步审计（adapter.py，v0.21.3）：
 #     退役覆写 9 个（上游 _post_message 链已覆盖）：send_multiple_images /
 #     send_image / send_image_file / send_document / send_video / send_voice /
 #     _derive_reply_to / _send_local_file / _send_url_as_file；
@@ -111,27 +103,50 @@ _do_patch() {
     local check="$3"
 
     if [[ ! -f "$file" ]]; then
-        fail "File not found: $1, skipped（文件不存在，已跳过）"
+        fail "File not found: $1（文件不存在）"
         return 1
     fi
-    if grep -q "$check" "$file" 2>/dev/null; then
-        ok "$label — already applied, skipping（已经好了，跳过）"
+    if grep -q -- "$check" "$file" 2>/dev/null; then
+        ok "$label — already applied（已经生效）"
         return 0
     fi
 
-    local output
-    output=$(python3 - "$file" 2>&1)
-    local rc=$?
+    local backup output rc
+    backup="$(mktemp "${file}.bak.XXXXXX")" || { fail "$label — backup failed（备份失败）"; return 1; }
+    cp "$file" "$backup"
+    output="$(python3 - "$file" 2>&1)" && rc=0 || rc=$?
+
     if [[ $rc -eq 0 && "$output" == *"APPLIED"* ]]; then
-        ok "$label — applied successfully（修复成功）"
+        if python3 - "$file" <<'PYCHK' 2>/dev/null
+import ast, sys
+ast.parse(open(sys.argv[1], encoding="utf-8").read())
+PYCHK
+        then
+            ok "$label — applied successfully（修复成功）"
+            rm -f "$backup"
+            return 0
+        fi
+        fail "$label — broke Python syntax and was rolled back（补丁导致语法错误，已回滚）"
     elif [[ $rc -eq 0 && "$output" == *"SKIP"* ]]; then
-        fail "$label — SKIP: upstream code changed, patch needs rewrite（跳过：上游代码已变，补丁需重写）"
-        return 1
+        fail "$label — SKIP: upstream code changed, patch needs rewrite（上游代码已变，补丁需重写）"
+        cp "$backup" "$file"
+        rm -f "$backup"
+        return 2
     else
-        fail "$label — failed, check if Hermes is properly installed（修复失败，请检查 Hermes 是否正常安装）"
-        [[ -n "$output" ]] && echo "  $output"
+        fail "$label — patch script failed（补丁脚本执行失败）"
+        [[ -n "$output" ]] && printf '%s\n' "$output"
     fi
-    return $rc
+
+    cp "$backup" "$file"
+    rm -f "$backup"
+    return 1
+}
+
+run_patch() {
+    local rc=0
+    _do_patch "$@" || rc=$?
+    failed_patches=$((failed_patches + (rc != 0)))
+    return 0
 }
 
 # ── E-P2: Clarify Session 分裂修复 ───────────────────────────────────────
@@ -147,7 +162,7 @@ _do_patch() {
 # 完成文本解析（attempt_text_response_for_session 也按 key 索引）。
 
 patch_clarify_session() {
-    _do_patch "gateway/run_inbound.py" \
+    run_patch "gateway/run_inbound.py" \
         "Fix: clarify session split causing AI amnesia（修复「Clarify 打断导致 AI 失忆」的问题）" \
         'Enhancer canonical clarify fallback' <<'PYEOF'
 import sys
@@ -222,7 +237,7 @@ PYEOF
 # 修复：候选去重，每 (platform, chat_id) 只保留 updated_at 最新的。
 
 patch_session_dedup() {
-    _do_patch "gateway/run_startup.py" \
+    run_patch "gateway/run_startup.py" \
         "Fix: auto-resume session leaking into wrong thread（修复「Gateway重启后多条Thread session串台」的问题）" \
         'Deduplicate.*keep only the most recent' <<'PYEOF'
 import sys
@@ -322,10 +337,13 @@ check_status() {
 
     if [[ $ok_count -eq $total ]]; then
         ok "All required patches applied.（所有必需补丁已生效）"
+        return 0
     elif [[ $ok_count -eq 0 ]]; then
         warn "No patches applied yet, run: $0 apply（还没有安装任何补丁，建议运行：$0 apply）"
+        return 1
     else
         warn "Some required patches still missing (${ok_count}/${total}), run: $0 apply（还有必需补丁没装完，建议运行：$0 apply）"
+        return 1
     fi
 }
 
@@ -353,16 +371,21 @@ print_restart_hint() {
 # ── 应用所有 ──────────────────────────────────────────────────────────────
 
 apply_all() {
+    local failed_patches=0
     info "Fixing issues with Hermes in Mattermost...（正在修复 Mattermost 相关问题...）"
     echo ""
     patch_clarify_session
     patch_session_dedup
     echo ""
-    ok "Patches applied!（补丁完成！）"
+    if [[ $failed_patches -eq 0 ]]; then
+        ok "Patches applied!（补丁完成！）"
+    else
+        fail "Some patches failed or were skipped (${failed_patches})（部分补丁失败或跳过）"
+    fi
 
     print_restart_hint
-
-    check_status
+    check_status || true
+    return "$failed_patches"
 }
 
 # ── 主命令分发 ────────────────────────────────────────────────────────────
@@ -371,10 +394,10 @@ CMD="${1:-check}"
 
 case "$CMD" in
     apply)
-        apply_all
+        apply_all && exit 0 || exit $?
         ;;
     check|status)
-        check_status
+        check_status && exit 0 || exit $?
         ;;
     *)
         echo "Usage: $0 {apply|check|status}（用法）"

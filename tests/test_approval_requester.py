@@ -97,28 +97,18 @@ sys.modules["gateway"] = gateway_mod
 sys.modules["gateway.platforms"] = platforms_mod
 sys.modules["gateway.platforms.base"] = base_mod
 
-# tools.approval — 真实模块（纯内存逻辑）
+# tools.approval is a facade in Hermes v0.21.3 and now imports several approval
+# leaves. This plugin test only exercises its public callback contract, so use a
+# narrow in-memory stub rather than coupling the test to Hermes internals.
 tools_pkg = types_mod.ModuleType("tools")
 tools_pkg.__path__ = []
 sys.modules["tools"] = tools_pkg
+approval_mod = types_mod.ModuleType("tools.approval")
+approval_mod._gateway_queues = {}
+approval_mod.resolve_gateway_approval = lambda *args, **kwargs: 0
+sys.modules["tools.approval"] = approval_mod
 
 import importlib.util
-
-approval_src = Path("/Users/Colin/.hermes/hermes-agent/tools/approval.py")
-
-
-def _load_real(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_load_real("tools.approval", approval_src)
-
-# adapter 顶部 `from tools.approval import resolve_gateway_approval`
-import tools.approval  # noqa: E402, F401
 
 # 加载插件 adapter
 pkg_name = "mm_sender_test_pkg"

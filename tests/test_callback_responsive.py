@@ -93,19 +93,51 @@ sys.modules["gateway"] = gateway_mod
 sys.modules["gateway.platforms"] = platforms_mod
 sys.modules["gateway.platforms.base"] = base_mod
 
-# tools.approval / tools.clarify_gateway — 用真实模块（纯内存逻辑）
+# Keep this plugin integration test independent from Hermes' internal approval
+# facade. v0.21.3 split that facade into several modules; the callback only
+# needs the public queue-resolution contract below.
 tools_pkg = types_mod.ModuleType("tools")
 tools_pkg.__path__ = []
 sys.modules["tools"] = tools_pkg
 
-approval_src = Path(
-    "/Users/Colin/.hermes/hermes-agent/tools/approval.py"
-)
 clarify_src = Path(
     "/Users/Colin/.hermes/hermes-agent/tools/clarify_gateway.py"
 )
 
 import importlib.util
+
+
+class _ApprovalEntry:
+    def __init__(self, data):
+        self.data = dict(data)
+        self.result = None
+
+
+approval_mod = types_mod.ModuleType("tools.approval")
+approval_mod._gateway_queues = {}
+
+
+def resolve_gateway_approval(session_key, choice, resolve_all=False, reason=None, request_id=None):
+    queue = approval_mod._gateway_queues.get(session_key, [])
+    targets = list(queue) if resolve_all else queue[:1]
+    if not targets:
+        return 0
+    for entry in targets:
+        entry.result = choice
+    if resolve_all:
+        queue.clear()
+    else:
+        queue.pop(0)
+    if not queue:
+        approval_mod._gateway_queues.pop(session_key, None)
+    return len(targets)
+
+
+approval_mod.resolve_gateway_approval = resolve_gateway_approval
+sys.modules["tools.approval"] = approval_mod
+approval_wait_mod = types_mod.ModuleType("tools.approval_gateway_wait")
+approval_wait_mod._ApprovalEntry = _ApprovalEntry
+sys.modules["tools.approval_gateway_wait"] = approval_wait_mod
 
 def _load_real(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -114,7 +146,6 @@ def _load_real(name, path):
     spec.loader.exec_module(mod)
     return mod
 
-approval_mod = _load_real("tools.approval", approval_src)
 clarify_mod = _load_real("tools.clarify_gateway", clarify_src)
 sys.modules["tools.environments"] = types_mod.ModuleType("tools.environments")
 sys.modules["tools.environments.base"] = types_mod.ModuleType("tools.environments.base")
@@ -122,8 +153,7 @@ sys.modules["tools.clarify_tool"] = types_mod.ModuleType("tools.clarify_tool")
 sys.modules["tools.clarify_tool"].strip_recommended = lambda s: s
 
 # adapter 里 `from tools.approval import resolve_gateway_approval`
-# 在模块顶部 — 需要真实符号可用
-import tools.approval as _ta  # noqa: E402
+# 在模块顶部 — 测试 stub 已提供该公开契约。
 import tools.clarify_gateway as _tc  # noqa: E402
 
 # 现在加载插件 adapter（作为包的子模块，让相对导入工作）

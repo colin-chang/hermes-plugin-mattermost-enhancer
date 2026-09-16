@@ -4,7 +4,7 @@ description: "Hermes Mattermost 增强插件 — DM 审批 / 模型切换 / 会�
 author: Colin Chang
 license: MIT
 kind: platform
-min_hermes_version: "v2026.9.7"
+min_hermes_version: "v2026.9.14"
 platforms:
   - mattermost
 hooks:
